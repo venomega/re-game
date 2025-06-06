@@ -23,7 +23,7 @@ const (
 	maxBufferSize = 1024 * 1024 // 1MB buffer
 	bufferSize = 60 // Buffer de 60 frames
 	jpegQuality = 60 // Reducimos calidad JPEG para mayor velocidad
-	captureThreads = 2 // Número de threads para captura
+	eventBufferSize = 1000 // Tamaño del buffer de eventos
 )
 
 // Constantes para tipos de eventos
@@ -35,6 +35,67 @@ const (
 	EVENT_MOUSEBUTTONUP = 5
 	EVENT_MOUSEWHEEL = 6
 )
+
+// Estructura para eventos
+type Event struct {
+	Type byte
+	Data []byte
+}
+
+type EventBuffer struct {
+	events []Event
+	mu     sync.Mutex
+	cond   *sync.Cond
+	head   int
+	tail   int
+	size   int
+}
+
+func NewEventBuffer(size int) *EventBuffer {
+	eb := &EventBuffer{
+		events: make([]Event, size),
+		size:   size,
+	}
+	eb.cond = sync.NewCond(&eb.mu)
+	return eb
+}
+
+func (eb *EventBuffer) Add(event Event) {
+	eb.mu.Lock()
+	defer eb.mu.Unlock()
+
+	// Si el buffer está lleno, avanzar el head
+	if (eb.tail+1)%eb.size == eb.head {
+		eb.head = (eb.head + 1) % eb.size
+	}
+
+	// Agregar el nuevo evento
+	eb.events[eb.tail] = event
+	eb.tail = (eb.tail + 1) % eb.size
+	eb.cond.Signal()
+}
+
+func (eb *EventBuffer) Get() Event {
+	eb.mu.Lock()
+	defer eb.mu.Unlock()
+
+	// Esperar hasta que haya un evento disponible
+	for eb.head == eb.tail {
+		eb.cond.Wait()
+	}
+
+	// Obtener el evento más antiguo
+	event := eb.events[eb.head]
+	eb.head = (eb.head + 1) % eb.size
+	return event
+}
+
+func (eb *EventBuffer) Clear() {
+	eb.mu.Lock()
+	defer eb.mu.Unlock()
+	eb.head = 0
+	eb.tail = 0
+}
 
 type FrameBuffer struct {
 	frames []image.Image
@@ -99,6 +160,55 @@ func init() {
 func handleEvents(conn net.Conn) {
 	defer conn.Close()
 
+	// Crear buffer de eventos
+	eventBuffer := NewEventBuffer(eventBufferSize)
+
+	// Iniciar thread de procesamiento de eventos
+	go func() {
+		for {
+			event := eventBuffer.Get()
+			switch event.Type {
+			case EVENT_KEYDOWN:
+				keyCode := binary.LittleEndian.Uint32(event.Data)
+				robotgo.KeyDown(string(keyCode))
+			case EVENT_KEYUP:
+				keyCode := binary.LittleEndian.Uint32(event.Data)
+				robotgo.KeyUp(string(keyCode))
+			case EVENT_MOUSEMOTION:
+				x := int(binary.LittleEndian.Uint32(event.Data[:4]))
+				y := int(binary.LittleEndian.Uint32(event.Data[4:8]))
+				robotgo.MoveMouse(x, y)
+			case EVENT_MOUSEBUTTONDOWN:
+				button := event.Data[0]
+				switch button {
+				case 1: // Izquierdo
+					robotgo.MouseDown("left")
+				case 2: // Medio
+					robotgo.MouseDown("center")
+				case 3: // Derecho
+					robotgo.MouseDown("right")
+				}
+			case EVENT_MOUSEBUTTONUP:
+				button := event.Data[0]
+				switch button {
+				case 1: // Izquierdo
+					robotgo.MouseUp("left")
+				case 2: // Medio
+					robotgo.MouseUp("center")
+				case 3: // Derecho
+					robotgo.MouseUp("right")
+				}
+			case EVENT_MOUSEWHEEL:
+				scroll := int(binary.LittleEndian.Uint32(event.Data))
+				if scroll > 0 {
+					robotgo.Scroll(scroll, 0)  // 0 para arriba
+				} else {
+					robotgo.Scroll(-scroll, 1)  // 1 para abajo
+				}
+			}
+		}
+	}()
+
 	// Buffer para recibir eventos
 	buf := make([]byte, 1024)
 
@@ -111,82 +221,46 @@ func handleEvents(conn net.Conn) {
 		}
 
 		eventType := buf[0]
+		var eventData []byte
 
+		// Recibir datos del evento según el tipo
 		switch eventType {
-		case EVENT_KEYDOWN:
-			// Recibir código de tecla
+		case EVENT_KEYDOWN, EVENT_KEYUP:
 			_, err := conn.Read(buf[:4])
 			if err != nil {
 				log.Printf("Error recibiendo código de tecla: %v", err)
 				return
 			}
-			keyCode := binary.LittleEndian.Uint32(buf[:4])
-			robotgo.KeyDown(string(keyCode))
-		case EVENT_KEYUP:
-			// Recibir código de tecla
-			_, err := conn.Read(buf[:4])
-			if err != nil {
-				log.Printf("Error recibiendo código de tecla: %v", err)
-				return
-			}
-			keyCode := binary.LittleEndian.Uint32(buf[:4])
-			robotgo.KeyUp(string(keyCode))
+			eventData = make([]byte, 4)
+			copy(eventData, buf[:4])
 		case EVENT_MOUSEMOTION:
-			// Recibir coordenadas del ratón
 			_, err := conn.Read(buf[:8])
 			if err != nil {
 				log.Printf("Error recibiendo coordenadas del ratón: %v", err)
 				return
 			}
-			x := int(binary.LittleEndian.Uint32(buf[:4]))
-			y := int(binary.LittleEndian.Uint32(buf[4:8]))
-			robotgo.MoveMouse(x, y)
-		case EVENT_MOUSEBUTTONDOWN:
-			// Recibir botón del ratón
+			eventData = make([]byte, 8)
+			copy(eventData, buf[:8])
+		case EVENT_MOUSEBUTTONDOWN, EVENT_MOUSEBUTTONUP:
 			_, err := conn.Read(buf[:1])
 			if err != nil {
 				log.Printf("Error recibiendo botón del ratón: %v", err)
 				return
 			}
-			button := buf[0]
-			switch button {
-			case 1: // Izquierdo
-				robotgo.MouseDown("left")
-			case 2: // Medio
-				robotgo.MouseDown("center")
-			case 3: // Derecho
-				robotgo.MouseDown("right")
-			}
-		case EVENT_MOUSEBUTTONUP:
-			// Recibir botón del ratón
-			_, err := conn.Read(buf[:1])
-			if err != nil {
-				log.Printf("Error recibiendo botón del ratón: %v", err)
-				return
-			}
-			button := buf[0]
-			switch button {
-			case 1: // Izquierdo
-				robotgo.MouseUp("left")
-			case 2: // Medio
-				robotgo.MouseUp("center")
-			case 3: // Derecho
-				robotgo.MouseUp("right")
-			}
+			eventData = make([]byte, 1)
+			copy(eventData, buf[:1])
 		case EVENT_MOUSEWHEEL:
-			// Recibir dirección de la rueda
 			_, err := conn.Read(buf[:4])
 			if err != nil {
 				log.Printf("Error recibiendo dirección de la rueda: %v", err)
 				return
 			}
-			scroll := int(binary.LittleEndian.Uint32(buf[:4]))
-			if scroll > 0 {
-				robotgo.Scroll(scroll, 0)  // 0 para arriba
-			} else {
-				robotgo.Scroll(-scroll, 1)  // 1 para abajo
-			}
+			eventData = make([]byte, 4)
+			copy(eventData, buf[:4])
 		}
+
+		// Agregar evento al buffer
+		eventBuffer.Add(Event{Type: eventType, Data: eventData})
 	}
 }
 
@@ -268,20 +342,26 @@ func handleConnection(conn net.Conn) {
 	// Crear buffer de frames
 	frameBuffer := NewFrameBuffer(bufferSize)
 
-	// Iniciar múltiples threads de captura
-	for i := 0; i < captureThreads; i++ {
-		go func() {
-			for {
-				img, err := screenshot.CaptureDisplay(0)
-				if err != nil {
-					log.Printf("Error capturando pantalla: %v", err)
-					continue
-				}
-				frameBuffer.Add(img)
-				time.Sleep(frameDuration / time.Duration(captureThreads))
+	// Mutex para sincronizar la captura de pantalla
+	var captureMutex sync.Mutex
+
+	// Iniciar thread de captura
+	go func() {
+		for {
+			// Sincronizar acceso a la captura de pantalla
+			captureMutex.Lock()
+			img, err := screenshot.CaptureDisplay(0)
+			captureMutex.Unlock()
+
+			if err != nil {
+				log.Printf("Error capturando pantalla: %v", err)
+				continue
 			}
-		}()
-	}
+
+			frameBuffer.Add(img)
+			time.Sleep(frameDuration)
+		}
+	}()
 
 	frameCount := 0
 	lastFPS := time.Now()

@@ -15,12 +15,13 @@ import (
 )
 
 const (
-	frameRate = 120  // Aumentamos el framerate objetivo
+	frameRate = 240  // Aumentamos el framerate objetivo
 	frameDuration = time.Second / frameRate
 	port = ":8080"
 	maxBufferSize = 1024 * 1024 // 1MB buffer
-	bufferSize = 30 // Buffer de 30 frames
-	jpegQuality = 80 // Calidad JPEG
+	bufferSize = 60 // Buffer de 60 frames
+	jpegQuality = 60 // Reducimos calidad JPEG para mayor velocidad
+	captureThreads = 2 // Número de threads para captura
 )
 
 type FrameBuffer struct {
@@ -141,22 +142,29 @@ func handleConnection(conn net.Conn) {
 	// Crear buffer de frames
 	frameBuffer := NewFrameBuffer(bufferSize)
 
-	// Iniciar captura de pantalla en un thread separado
-	go func() {
-		for {
-			img, err := screenshot.CaptureDisplay(0)
-			if err != nil {
-				log.Printf("Error capturando pantalla: %v", err)
-				continue
+	// Crear canal para sincronización de captura
+
+	// Iniciar múltiples threads de captura
+	for i := 0; i < captureThreads; i++ {
+		go func() {
+			for {
+				img, err := screenshot.CaptureDisplay(0)
+				if err != nil {
+					log.Printf("Error capturando pantalla: %v", err)
+					continue
+				}
+				frameBuffer.Add(img)
+				time.Sleep(frameDuration / time.Duration(captureThreads))
 			}
-			frameBuffer.Add(img)
-			time.Sleep(frameDuration)
-		}
-	}()
+		}()
+	}
 
 	frameCount := 0
 	lastFPS := time.Now()
 	lastFrameTime := time.Now()
+
+	// Buffer pre-asignado para JPEG
+	jpegBuffer := make([]byte, maxBufferSize)
 
 	for {
 		startTime := time.Now()
@@ -164,8 +172,8 @@ func handleConnection(conn net.Conn) {
 		// Obtener frame del buffer
 		frame := frameBuffer.Get()
 
-		// Comprimir frame a JPEG
-		buf := new(bytes.Buffer)
+		// Comprimir frame a JPEG usando el buffer pre-asignado
+		buf := bytes.NewBuffer(jpegBuffer[:0])
 		if err := jpeg.Encode(buf, frame, &jpeg.Options{Quality: jpegQuality}); err != nil {
 			log.Printf("Error comprimiendo frame: %v", err)
 			continue

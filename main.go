@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"image"
+	"image/jpeg"
 	"log"
 	"net"
 	"runtime"
@@ -11,9 +12,6 @@ import (
 	"time"
 
 	"github.com/kbinani/screenshot"
-	"github.com/pion/webrtc/v3"
-	"github.com/pion/webrtc/v3/pkg/media"
-	"github.com/pion/webrtc/v3/pkg/media/h264writer"
 )
 
 const (
@@ -22,6 +20,7 @@ const (
 	port = ":8080"
 	maxBufferSize = 1024 * 1024 // 1MB buffer
 	bufferSize = 30 // Buffer de 30 frames
+	jpegQuality = 80 // Calidad JPEG
 )
 
 type FrameBuffer struct {
@@ -155,17 +154,6 @@ func handleConnection(conn net.Conn) {
 		}
 	}()
 
-	// Configurar codificador H.264
-	encoder, err := h264writer.NewWithOptions(h264writer.Options{
-		Width:  width,
-		Height: height,
-		FPS:    float64(frameRate),
-	})
-	if err != nil {
-		log.Printf("Error creando codificador H.264: %v", err)
-		return
-	}
-
 	frameCount := 0
 	lastFPS := time.Now()
 	lastFrameTime := time.Now()
@@ -176,22 +164,22 @@ func handleConnection(conn net.Conn) {
 		// Obtener frame del buffer
 		frame := frameBuffer.Get()
 
-		// Codificar frame a H.264
-		encodedFrame, err := encoder.Encode(frame)
-		if err != nil {
-			log.Printf("Error codificando frame: %v", err)
+		// Comprimir frame a JPEG
+		buf := new(bytes.Buffer)
+		if err := jpeg.Encode(buf, frame, &jpeg.Options{Quality: jpegQuality}); err != nil {
+			log.Printf("Error comprimiendo frame: %v", err)
 			continue
 		}
 
-		// Enviar tamaño del frame codificado
-		frameSize := uint32(len(encodedFrame))
+		// Enviar tamaño del frame comprimido
+		frameSize := uint32(buf.Len())
 		if err := binary.Write(conn, binary.LittleEndian, frameSize); err != nil {
 			log.Printf("Error enviando tamaño del frame: %v", err)
 			return
 		}
 
-		// Enviar frame codificado
-		if _, err := conn.Write(encodedFrame); err != nil {
+		// Enviar frame comprimido
+		if _, err := conn.Write(buf.Bytes()); err != nil {
 			log.Printf("Error enviando frame: %v", err)
 			return
 		}

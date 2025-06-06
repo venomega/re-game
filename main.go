@@ -157,6 +157,61 @@ func init() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 }
 
+// Mapeo de códigos SDL a códigos de robotgo
+var keyMap = map[uint32]string{
+	13:  "enter",     // Return
+	8:   "backspace", // Backspace
+	9:   "tab",       // Tab
+	27:  "esc",       // Escape
+	32:  "space",     // Space
+	273: "up",        // Up arrow
+	274: "down",      // Down arrow
+	275: "right",     // Right arrow
+	276: "left",      // Left arrow
+	277: "insert",    // Insert
+	278: "home",      // Home
+	279: "end",       // End
+	280: "pageup",    // Page Up
+	281: "pagedown",  // Page Down
+	282: "f1",        // F1
+	283: "f2",        // F2
+	284: "f3",        // F3
+	285: "f4",        // F4
+	286: "f5",        // F5
+	287: "f6",        // F6
+	288: "f7",        // F7
+	289: "f8",        // F8
+	290: "f9",        // F9
+	291: "f10",       // F10
+	292: "f11",       // F11
+	293: "f12",       // F12
+	1073742048: "ctrl",   // Left Ctrl
+	1073742052: "ctrl",   // Right Ctrl
+	1073742049: "shift",  // Left Shift
+	1073742053: "shift",  // Right Shift
+	1073742050: "alt",    // Left Alt
+	1073742054: "alt",    // Right Alt
+	1073742051: "super",  // Left Super/Windows
+	1073742055: "super",  // Right Super/Windows
+}
+
+// Estado de las teclas modificadoras
+var modifierState = struct {
+	ctrl  bool
+	alt   bool
+	super bool
+	shift bool
+	sync.Mutex
+}{}
+
+func getKeyName(keyCode uint32) string {
+	if name, ok := keyMap[keyCode]; ok {
+		return name
+	}
+	// Para teclas normales, convertir a minúscula
+	return string(rune(keyCode))
+}
+
 func handleEvents(conn net.Conn) {
 	defer conn.Close()
 
@@ -170,10 +225,44 @@ func handleEvents(conn net.Conn) {
 			switch event.Type {
 			case EVENT_KEYDOWN:
 				keyCode := binary.LittleEndian.Uint32(event.Data)
-				robotgo.KeyDown(string(keyCode))
+				keyName := getKeyName(keyCode)
+				
+				// Actualizar estado de modificadores
+				modifierState.Lock()
+				switch keyName {
+				case "ctrl":
+					modifierState.ctrl = true
+				case "alt":
+					modifierState.alt = true
+				case "super":
+					modifierState.super = true
+				case "shift":
+					modifierState.shift = true
+				}
+				modifierState.Unlock()
+
+				// Presionar tecla
+				robotgo.KeyDown(keyName)
 			case EVENT_KEYUP:
 				keyCode := binary.LittleEndian.Uint32(event.Data)
-				robotgo.KeyUp(string(keyCode))
+				keyName := getKeyName(keyCode)
+				
+				// Actualizar estado de modificadores
+				modifierState.Lock()
+				switch keyName {
+				case "ctrl":
+					modifierState.ctrl = false
+				case "alt":
+					modifierState.alt = false
+				case "super":
+					modifierState.super = false
+				case "shift":
+					modifierState.shift = false
+				}
+				modifierState.Unlock()
+
+				// Liberar tecla
+				robotgo.KeyUp(keyName)
 			case EVENT_MOUSEMOTION:
 				x := int(binary.LittleEndian.Uint32(event.Data[:4]))
 				y := int(binary.LittleEndian.Uint32(event.Data[4:8]))

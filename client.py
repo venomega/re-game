@@ -8,6 +8,7 @@ import cv2
 import sys
 import threading
 from collections import deque
+import queue
 
 # Constantes para tipos de eventos
 EVENT_KEYDOWN = 1
@@ -59,15 +60,39 @@ class ScreenShareViewer:
         
         # Socket para eventos
         self.event_socket = event_socket
+        
+        # Buffer de eventos y thread
+        self.event_queue = queue.Queue(maxsize=1000)  # Buffer de eventos
+        self.event_thread = threading.Thread(target=self._event_sender)
+        self.event_thread.daemon = True
+        self.event_thread.start()
+
+    def _event_sender(self):
+        """Thread dedicado para enviar eventos al servidor"""
+        while self.running:
+            try:
+                event_data = self.event_queue.get(timeout=0.001)  # Timeout corto para no bloquear
+                self.event_socket.sendall(event_data)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Error enviando evento: {e}")
+                break
 
     def send_event(self, event_type, data):
+        """Agrega un evento al buffer de eventos"""
         try:
-            # Enviar tipo de evento
-            self.event_socket.send(struct.pack('<B', event_type))
-            # Enviar datos del evento
-            self.event_socket.send(data)
-        except Exception as e:
-            print(f"Error enviando evento: {e}")
+            # Crear el paquete de evento
+            event_data = struct.pack('<B', event_type) + data
+            # Intentar agregar al buffer sin bloquear
+            self.event_queue.put_nowait(event_data)
+        except queue.Full:
+            # Si el buffer está lleno, descartar el evento más antiguo
+            try:
+                self.event_queue.get_nowait()
+                self.event_queue.put_nowait(event_data)
+            except:
+                pass
 
     def handle_events(self):
         for event in sdl2.ext.get_events():

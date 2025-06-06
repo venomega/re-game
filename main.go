@@ -12,16 +12,28 @@ import (
 	"time"
 
 	"github.com/kbinani/screenshot"
+	"github.com/go-vgo/robotgo"
 )
 
 const (
 	frameRate = 240  // Aumentamos el framerate objetivo
 	frameDuration = time.Second / frameRate
-	port = ":8080"
+	framePort = ":8080"
+	eventPort = ":8081"
 	maxBufferSize = 1024 * 1024 // 1MB buffer
 	bufferSize = 60 // Buffer de 60 frames
 	jpegQuality = 60 // Reducimos calidad JPEG para mayor velocidad
 	captureThreads = 2 // Número de threads para captura
+)
+
+// Constantes para tipos de eventos
+const (
+	EVENT_KEYDOWN = 1
+	EVENT_KEYUP = 2
+	EVENT_MOUSEMOTION = 3
+	EVENT_MOUSEBUTTONDOWN = 4
+	EVENT_MOUSEBUTTONUP = 5
+	EVENT_MOUSEWHEEL = 6
 )
 
 type FrameBuffer struct {
@@ -84,6 +96,100 @@ func init() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 }
 
+func handleEvents(conn net.Conn) {
+	defer conn.Close()
+
+	// Buffer para recibir eventos
+	buf := make([]byte, 1024)
+
+	for {
+		// Recibir tipo de evento
+		_, err := conn.Read(buf[:1])
+		if err != nil {
+			log.Printf("Error recibiendo tipo de evento: %v", err)
+			return
+		}
+
+		eventType := buf[0]
+
+		switch eventType {
+		case EVENT_KEYDOWN:
+			// Recibir código de tecla
+			_, err := conn.Read(buf[:4])
+			if err != nil {
+				log.Printf("Error recibiendo código de tecla: %v", err)
+				return
+			}
+			keyCode := binary.LittleEndian.Uint32(buf[:4])
+			robotgo.KeyDown(string(keyCode))
+		case EVENT_KEYUP:
+			// Recibir código de tecla
+			_, err := conn.Read(buf[:4])
+			if err != nil {
+				log.Printf("Error recibiendo código de tecla: %v", err)
+				return
+			}
+			keyCode := binary.LittleEndian.Uint32(buf[:4])
+			robotgo.KeyUp(string(keyCode))
+		case EVENT_MOUSEMOTION:
+			// Recibir coordenadas del ratón
+			_, err := conn.Read(buf[:8])
+			if err != nil {
+				log.Printf("Error recibiendo coordenadas del ratón: %v", err)
+				return
+			}
+			x := int(binary.LittleEndian.Uint32(buf[:4]))
+			y := int(binary.LittleEndian.Uint32(buf[4:8]))
+			robotgo.MoveMouse(x, y)
+		case EVENT_MOUSEBUTTONDOWN:
+			// Recibir botón del ratón
+			_, err := conn.Read(buf[:1])
+			if err != nil {
+				log.Printf("Error recibiendo botón del ratón: %v", err)
+				return
+			}
+			button := buf[0]
+			switch button {
+			case 1: // Izquierdo
+				robotgo.MouseDown("left")
+			case 2: // Medio
+				robotgo.MouseDown("center")
+			case 3: // Derecho
+				robotgo.MouseDown("right")
+			}
+		case EVENT_MOUSEBUTTONUP:
+			// Recibir botón del ratón
+			_, err := conn.Read(buf[:1])
+			if err != nil {
+				log.Printf("Error recibiendo botón del ratón: %v", err)
+				return
+			}
+			button := buf[0]
+			switch button {
+			case 1: // Izquierdo
+				robotgo.MouseUp("left")
+			case 2: // Medio
+				robotgo.MouseUp("center")
+			case 3: // Derecho
+				robotgo.MouseUp("right")
+			}
+		case EVENT_MOUSEWHEEL:
+			// Recibir dirección de la rueda
+			_, err := conn.Read(buf[:4])
+			if err != nil {
+				log.Printf("Error recibiendo dirección de la rueda: %v", err)
+				return
+			}
+			scroll := int(binary.LittleEndian.Uint32(buf[:4]))
+			if scroll > 0 {
+				robotgo.Scroll(scroll, 0)  // 0 para arriba
+			} else {
+				robotgo.Scroll(-scroll, 1)  // 1 para abajo
+			}
+		}
+	}
+}
+
 func main() {
 	// Obtener la IP local
 	addrs, err := net.InterfaceAddrs()
@@ -104,25 +210,45 @@ func main() {
 		localIP = "127.0.0.1"
 	}
 
-	// Iniciar el servidor TCP
-	listener, err := net.Listen("tcp", port)
+	// Iniciar el servidor TCP para frames
+	frameListener, err := net.Listen("tcp", framePort)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer listener.Close()
+	defer frameListener.Close()
 
-	log.Printf("Servidor iniciado en %s%s", localIP, port)
+	// Iniciar el servidor TCP para eventos
+	eventListener, err := net.Listen("tcp", eventPort)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer eventListener.Close()
+
+	log.Printf("Servidor iniciado en %s%s (frames) y %s%s (eventos)", localIP, framePort, localIP, eventPort)
 	log.Println("Esperando conexión del cliente...")
 
-	// Aceptar conexiones
+	// Aceptar conexiones de eventos
+	go func() {
+		for {
+			conn, err := eventListener.Accept()
+			if err != nil {
+				log.Printf("Error al aceptar conexión de eventos: %v", err)
+				continue
+			}
+			log.Printf("Cliente conectado para eventos desde %s", conn.RemoteAddr())
+			go handleEvents(conn)
+		}
+	}()
+
+	// Aceptar conexiones de frames
 	for {
-		conn, err := listener.Accept()
+		conn, err := frameListener.Accept()
 		if err != nil {
-			log.Printf("Error al aceptar conexión: %v", err)
+			log.Printf("Error al aceptar conexión de frames: %v", err)
 			continue
 		}
 
-		log.Printf("Cliente conectado desde %s", conn.RemoteAddr())
+		log.Printf("Cliente conectado para frames desde %s", conn.RemoteAddr())
 		go handleConnection(conn)
 	}
 }
@@ -141,8 +267,6 @@ func handleConnection(conn net.Conn) {
 
 	// Crear buffer de frames
 	frameBuffer := NewFrameBuffer(bufferSize)
-
-	// Crear canal para sincronización de captura
 
 	// Iniciar múltiples threads de captura
 	for i := 0; i < captureThreads; i++ {

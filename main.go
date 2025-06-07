@@ -5,25 +5,36 @@ import (
 	"encoding/binary"
 	"image"
 	"image/jpeg"
+	"io"
 	"log"
+	"math"
 	"net"
+	"os"
+	"os/exec"
 	"runtime"
 	"sync"
 	"time"
+	"strings"
 
-	"github.com/kbinani/screenshot"
+	"bufio"
+
 	"github.com/go-vgo/robotgo"
+	"github.com/kbinani/screenshot"
 )
 
 const (
-	frameRate = 240  // Aumentamos el framerate objetivo
+	frameRate = 120  // Aumentamos a 120 FPS para mejor rendimiento
 	frameDuration = time.Second / frameRate
 	framePort = ":8080"
 	eventPort = ":8081"
+	audioPort = ":8082"  // Puerto para streaming de audio
 	maxBufferSize = 1024 * 1024 // 1MB buffer
-	bufferSize = 60 // Buffer de 60 frames
-	jpegQuality = 60 // Reducimos calidad JPEG para mayor velocidad
-	eventBufferSize = 1000 // Tamaño del buffer de eventos
+	bufferSize = 1 // Mantenemos 1 frame para mínima latencia
+	jpegQuality = 35 // Reducimos calidad para mejor rendimiento
+	eventBufferSize = 1
+	audioSampleRate = 48000 // Tasa de muestreo de audio actualizada a 48kHz
+	audioChannels = 2       // Audio estéreo
+	audioBufferSize = 1024  // Ajustado para mejor calidad
 )
 
 // Constantes para tipos de eventos
@@ -152,6 +163,111 @@ func (fb *FrameBuffer) Clear() {
 	fb.tail = 0
 }
 
+// AudioBuffer para manejar el streaming de audio
+type AudioBuffer struct {
+	buffer []float32
+	mu     sync.Mutex
+	cond   *sync.Cond
+	head   int
+	tail   int
+	size   int
+}
+
+func NewAudioBuffer(size int) *AudioBuffer {
+	ab := &AudioBuffer{
+		buffer: make([]float32, size),
+		size:   size,
+	}
+	ab.cond = sync.NewCond(&ab.mu)
+	return ab
+}
+
+func (ab *AudioBuffer) Add(samples []float32) {
+	ab.mu.Lock()
+	defer ab.mu.Unlock()
+
+	for _, sample := range samples {
+		// Si el buffer está lleno, avanzar el head
+		if (ab.tail+1)%ab.size == ab.head {
+			ab.head = (ab.head + 1) % ab.size
+		}
+
+		// Agregar la nueva muestra
+		ab.buffer[ab.tail] = sample
+		ab.tail = (ab.tail + 1) % ab.size
+	}
+	ab.cond.Signal()
+}
+
+func (ab *AudioBuffer) Get(n int) []float32 {
+	ab.mu.Lock()
+	defer ab.mu.Unlock()
+
+	// Esperar hasta que haya suficientes muestras disponibles
+	for (ab.tail-ab.head+ab.size)%ab.size < n {
+		ab.cond.Wait()
+	}
+
+	// Obtener las muestras más antiguas
+	samples := make([]float32, n)
+	for i := 0; i < n; i++ {
+		samples[i] = ab.buffer[ab.head]
+		ab.head = (ab.head + 1) % ab.size
+	}
+	return samples
+}
+
+// AudioReader implementa io.Reader para el streaming de audio
+type AudioReader struct {
+	buffer []float32
+	pos    int
+	mu     sync.Mutex
+	cond   *sync.Cond
+}
+
+func NewAudioReader(size int) *AudioReader {
+	ar := &AudioReader{
+		buffer: make([]float32, size),
+	}
+	ar.cond = sync.NewCond(&ar.mu)
+	return ar
+}
+
+func (r *AudioReader) Read(p []byte) (n int, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Esperar hasta que haya datos disponibles
+	for r.pos >= len(r.buffer) {
+		r.cond.Wait()
+	}
+
+	// Convertir el buffer de float32 a bytes
+	available := len(r.buffer) - r.pos
+	bytesToRead := len(p)
+	if bytesToRead > available*4 {
+		bytesToRead = available * 4
+	}
+
+	// Copiar los datos al buffer de salida
+	for i := 0; i < bytesToRead/4; i++ {
+		binary.LittleEndian.PutUint32(p[i*4:], math.Float32bits(r.buffer[r.pos+i]))
+	}
+
+	r.pos += bytesToRead / 4
+	return bytesToRead, nil
+}
+
+func (r *AudioReader) Write(samples []float32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Copiar las nuevas muestras al buffer
+	copy(r.buffer, samples)
+	r.pos = 0
+	r.cond.Signal() // Notificar que hay nuevos datos disponibles
+}
+
 func init() {
 	// Configurar Go para usar todos los núcleos disponibles
 	runtime.GOMAXPROCS(runtime.NumCPU())
@@ -204,6 +320,14 @@ var modifierState = struct {
 	sync.Mutex
 }{}
 
+// Estado del mouse grab
+var mouseGrab = struct {
+	enabled bool
+	windowX, windowY int
+	windowWidth, windowHeight int
+	sync.Mutex
+}{}
+
 func getKeyName(keyCode uint32) string {
 	if name, ok := keyMap[keyCode]; ok {
 		return name
@@ -218,15 +342,19 @@ func handleEvents(conn net.Conn) {
 	// Crear buffer de eventos
 	eventBuffer := NewEventBuffer(eventBufferSize)
 
+	// Variables para el control del mouse
+	var lastTime time.Time
+
 	// Iniciar thread de procesamiento de eventos
 	go func() {
 		for {
 			event := eventBuffer.Get()
+			println("Reached: ", event.Type, binary.LittleEndian.Uint32(event.Data) , "KC", getKeyName(binary.LittleEndian.Uint32(event.Data)))
 			switch event.Type {
 			case EVENT_KEYDOWN:
 				keyCode := binary.LittleEndian.Uint32(event.Data)
 				keyName := getKeyName(keyCode)
-				
+
 				// Actualizar estado de modificadores
 				modifierState.Lock()
 				switch keyName {
@@ -246,7 +374,7 @@ func handleEvents(conn net.Conn) {
 			case EVENT_KEYUP:
 				keyCode := binary.LittleEndian.Uint32(event.Data)
 				keyName := getKeyName(keyCode)
-				
+
 				// Actualizar estado de modificadores
 				modifierState.Lock()
 				switch keyName {
@@ -264,9 +392,38 @@ func handleEvents(conn net.Conn) {
 				// Liberar tecla
 				robotgo.KeyUp(keyName)
 			case EVENT_MOUSEMOTION:
-				x := int(binary.LittleEndian.Uint32(event.Data[:4]))
-				y := int(binary.LittleEndian.Uint32(event.Data[4:8]))
-				robotgo.MoveMouse(x, y)
+				now := time.Now()
+				relX := int(binary.LittleEndian.Uint32(event.Data[:4]))
+				relY := int(binary.LittleEndian.Uint32(event.Data[4:8]))
+
+				// Debug: Imprimir valores recibidos
+				log.Printf("Mouse motion received - relX: %d, relY: %d", relX, relY)
+
+				// Obtener la posición actual del mouse
+				currentX, currentY := robotgo.GetMousePos()
+
+				// Calcular el tiempo transcurrido en segundos
+				elapsed := now.Sub(lastTime).Seconds()
+				if elapsed == 0 {
+					continue // Evitar división por cero
+				}
+
+				// Aplicar un factor de sensibilidad fijo para mejor control
+				sensitivity := 1.0 // Ya no necesitamos reducir la sensibilidad porque ya está escalada
+
+				// Calcular el movimiento final
+				moveX := int(float64(relX) * sensitivity)
+				moveY := int(float64(relY) * sensitivity)
+
+				// Solo mover si hay un cambio significativo
+				if moveX != 0 || moveY != 0 {
+					// Debug: Imprimir movimiento calculado
+					log.Printf("Moving mouse - current: (%d,%d), move: (%d,%d)", currentX, currentY, moveX, moveY)
+
+					// Mover el mouse relativamente
+					robotgo.MoveMouse(currentX + moveX, currentY + moveY)
+					lastTime = now
+				}
 			case EVENT_MOUSEBUTTONDOWN:
 				button := event.Data[0]
 				switch button {
@@ -353,68 +510,8 @@ func handleEvents(conn net.Conn) {
 	}
 }
 
-func main() {
-	// Obtener la IP local
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		log.Fatal(err)
-	}
-	var localIP string
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				localIP = ipnet.IP.String()
-				break
-			}
-		}
-	}
-
-	if localIP == "" {
-		localIP = "127.0.0.1"
-	}
-
-	// Iniciar el servidor TCP para frames
-	frameListener, err := net.Listen("tcp", framePort)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer frameListener.Close()
-
-	// Iniciar el servidor TCP para eventos
-	eventListener, err := net.Listen("tcp", eventPort)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer eventListener.Close()
-
-	log.Printf("Servidor iniciado en %s%s (frames) y %s%s (eventos)", localIP, framePort, localIP, eventPort)
-	log.Println("Esperando conexión del cliente...")
-
-	// Aceptar conexiones de eventos
-	go func() {
-		for {
-			conn, err := eventListener.Accept()
-			if err != nil {
-				log.Printf("Error al aceptar conexión de eventos: %v", err)
-				continue
-			}
-			log.Printf("Cliente conectado para eventos desde %s", conn.RemoteAddr())
-			go handleEvents(conn)
-		}
-	}()
-
-	// Aceptar conexiones de frames
-	for {
-		conn, err := frameListener.Accept()
-		if err != nil {
-			log.Printf("Error al aceptar conexión de frames: %v", err)
-			continue
-		}
-
-		log.Printf("Cliente conectado para frames desde %s", conn.RemoteAddr())
-		go handleConnection(conn)
-	}
-}
+// Mutex global para sincronizar la captura de pantalla
+var captureMutex sync.Mutex
 
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
@@ -428,16 +525,24 @@ func handleConnection(conn net.Conn) {
 	binary.Write(conn, binary.LittleEndian, uint32(width))
 	binary.Write(conn, binary.LittleEndian, uint32(height))
 
-	// Crear buffer de frames
-	frameBuffer := NewFrameBuffer(bufferSize)
+	// Buffer pre-asignado para JPEG
+	jpegBuffer := make([]byte, maxBufferSize)
 
-	// Mutex para sincronizar la captura de pantalla
-	var captureMutex sync.Mutex
+	// Canal para sincronización
+	frameChan := make(chan image.Image, 1)
 
 	// Iniciar thread de captura
 	go func() {
+		lastCapture := time.Now()
 		for {
-			// Sincronizar acceso a la captura de pantalla
+			// Control de framerate para la captura
+			elapsed := time.Since(lastCapture)
+			if elapsed < frameDuration {
+				time.Sleep(frameDuration - elapsed)
+			}
+			lastCapture = time.Now()
+
+			// Captura de pantalla con mutex
 			captureMutex.Lock()
 			img, err := screenshot.CaptureDisplay(0)
 			captureMutex.Unlock()
@@ -447,8 +552,12 @@ func handleConnection(conn net.Conn) {
 				continue
 			}
 
-			frameBuffer.Add(img)
-			time.Sleep(frameDuration)
+			// Enviar frame al canal
+			select {
+			case frameChan <- img:
+			default:
+				// Si el canal está lleno, descartamos el frame
+			}
 		}
 	}()
 
@@ -456,14 +565,11 @@ func handleConnection(conn net.Conn) {
 	lastFPS := time.Now()
 	lastFrameTime := time.Now()
 
-	// Buffer pre-asignado para JPEG
-	jpegBuffer := make([]byte, maxBufferSize)
-
 	for {
 		startTime := time.Now()
 
-		// Obtener frame del buffer
-		frame := frameBuffer.Get()
+		// Obtener frame del canal
+		frame := <-frameChan
 
 		// Comprimir frame a JPEG usando el buffer pre-asignado
 		buf := bytes.NewBuffer(jpegBuffer[:0])
@@ -501,4 +607,332 @@ func handleConnection(conn net.Conn) {
 			time.Sleep(frameDuration - elapsed)
 		}
 	}
+}
+
+func captureSystemAudio(audioChan chan<- []float32) {
+	log.Printf("Starting captureSystemAudio function")
+
+	// Construct ffmpeg command to capture from ALSA
+	for {
+		cmd := exec.Command("ffmpeg",
+			"-re",             // Read input at native frame rate
+			"-f", "alsa",      // Use ALSA directly
+			"-i", "default",   // Use default ALSA device
+			"-f", "f32le",     // Output format: 32-bit float little-endian
+			"-ar", "48000",    // Sample rate: 48kHz
+			"-ac", "2",        // Channels: stereo
+			"-bufsize", "4096", // Buffer size ajustado
+			"-loglevel", "error", // Solo errores
+			"-")               // Output to stdout
+
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			log.Printf("Error creating pipe for ffmpeg: %v", err)
+			time.Sleep(time.Second)
+			continue
+		}
+
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			log.Printf("Error creating stderr pipe for ffmpeg: %v", err)
+			time.Sleep(time.Second)
+			continue
+		}
+
+		// Capturar stderr para logging
+		go func() {
+			scanner := bufio.NewScanner(stderr)
+			for scanner.Scan() {
+				log.Printf("ffmpeg: %s", scanner.Text())
+			}
+		}()
+
+		if err := cmd.Start(); err != nil {
+			log.Printf("Error starting ffmpeg: %v", err)
+			time.Sleep(time.Second)
+			continue
+		}
+
+		log.Printf("Starting system audio capture from ALSA default device")
+
+		// Buffer for reading data
+		buf := make([]byte, audioBufferSize*4) // 4 bytes per sample (float32)
+
+		// Esperar a que ffmpeg termine
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+
+		// Leer datos hasta que ffmpeg termine
+		for {
+			select {
+			case err := <-done:
+				log.Printf("ffmpeg process ended: %v", err)
+				goto restart_alsa
+			default:
+				n, err := stdout.Read(buf)
+				if err != nil {
+					if err != io.EOF {
+						log.Printf("Error reading audio: %v", err)
+					}
+					goto restart_alsa
+				}
+
+				if n == 0 {
+					time.Sleep(time.Millisecond * 1) // Mínima espera
+					continue
+				}
+
+				// Convert bytes to float32 samples
+				samples := make([]float32, n/4)
+				for i := range samples {
+					samples[i] = math.Float32frombits(binary.LittleEndian.Uint32(buf[i*4 : (i+1)*4]))
+				}
+
+				// Send samples to channel
+				select {
+				case audioChan <- samples:
+				default:
+					// Si el canal está lleno, descartamos las muestras
+				}
+			}
+		}
+
+	restart_alsa:
+		log.Printf("Restarting ALSA capture...")
+		time.Sleep(time.Second)
+	}
+}
+
+func handleAudioConnection(conn net.Conn) {
+	defer conn.Close()
+	log.Printf("Starting handleAudioConnection")
+
+	// Enviar byte de inicio de configuración
+	if _, err := conn.Write([]byte{0xFF}); err != nil {
+		log.Printf("Error sending config start byte: %v", err)
+		return
+	}
+
+	// Enviar configuración de audio al cliente
+	config := struct {
+		SampleRate   uint32
+		Channels     uint32
+		BufferSize   uint32
+	}{
+		SampleRate:   uint32(audioSampleRate),
+		Channels:     uint32(audioChannels),
+		BufferSize:   uint32(audioBufferSize),
+	}
+
+	log.Printf("Sending audio configuration: SampleRate=%d, Channels=%d, BufferSize=%d",
+		config.SampleRate, config.Channels, config.BufferSize)
+
+	// Enviar la configuración completa en un solo write
+	configBytes := make([]byte, 12) // 3 uint32 = 12 bytes
+	binary.LittleEndian.PutUint32(configBytes[0:], config.SampleRate)
+	binary.LittleEndian.PutUint32(configBytes[4:], config.Channels)
+	binary.LittleEndian.PutUint32(configBytes[8:], config.BufferSize)
+
+	if _, err := conn.Write(configBytes); err != nil {
+		log.Printf("Error sending audio config: %v", err)
+		return
+	}
+
+	// Esperar confirmación del cliente
+	response := make([]byte, 1)
+	if _, err := conn.Read(response); err != nil {
+		log.Printf("Error reading client confirmation: %v", err)
+		return
+	}
+
+	if response[0] != 0xAA {
+		log.Printf("Invalid client confirmation: %v", response[0])
+		return
+	}
+
+	log.Printf("Audio configuration confirmed by client")
+
+	// Canal para recibir audio del sistema
+	audioChan := make(chan []float32, 20) // Buffer moderado para mejor calidad
+
+	// Iniciar captura de audio del sistema
+	log.Printf("Starting system audio capture")
+	go captureSystemAudio(audioChan)
+
+	log.Printf("Iniciando streaming de audio...")
+
+	for {
+		// Recibir audio del sistema
+		samples := <-audioChan
+
+		// Enviar byte de inicio de chunk
+		if _, err := conn.Write([]byte{0xFE}); err != nil {
+			log.Printf("Error sending chunk start byte: %v", err)
+			return
+		}
+
+		// Enviar tamaño del chunk
+		chunkSize := uint32(len(samples) * 4) // 4 bytes por muestra (float32)
+		chunkSizeBytes := make([]byte, 4)
+		binary.LittleEndian.PutUint32(chunkSizeBytes, chunkSize)
+		if _, err := conn.Write(chunkSizeBytes); err != nil {
+			log.Printf("Error enviando tamaño de audio: %v", err)
+			return
+		}
+
+		// Convertir muestras a bytes
+		buf := make([]byte, chunkSize)
+		for i, sample := range samples {
+			binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(sample))
+		}
+
+		// Enviar chunk de audio
+		if _, err := conn.Write(buf); err != nil {
+			log.Printf("Error enviando audio: %v", err)
+			return
+		}
+	}
+}
+
+func CheckErr(err error, text string){
+	if err != nil{
+		println("ERROR:", text, err.Error())
+		os.Exit(1)
+	}
+}
+
+func GetDefaultSink() string{
+	cmd := exec.Command("pactl", "info")
+	stdout, err := cmd.Output()
+	CheckErr(err, "Error getting default sink")
+	sink := []byte("")
+	for _, v := range bytes.Split(stdout, []byte("\n")){
+		if bytes.Contains(v, []byte("Default Sink:")) {
+			sink = bytes.TrimSpace(bytes.Split(v, []byte(":"))[1])
+		}
+	}
+	return string(sink) + ".monitor"
+}
+
+func main() {
+	GetDefaultSink()
+	// Obtener la IP local
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		log.Fatal(err)
+	}
+	var localIP string
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				localIP = ipnet.IP.String()
+				break
+			}
+		}
+	}
+
+	if localIP == "" {
+		localIP = "127.0.0.1"
+	}
+
+	// Iniciar el servidor TCP para frames
+	log.Printf("Starting frame server on %s%s", localIP, framePort)
+	frameListener, err := net.Listen("tcp", framePort)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer frameListener.Close()
+
+	// Iniciar el servidor TCP para eventos
+	log.Printf("Starting event server on %s%s", localIP, eventPort)
+	eventListener, err := net.Listen("tcp", eventPort)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer eventListener.Close()
+
+	// Iniciar el servidor TCP para audio
+	//log.Printf("Starting audio server on %s%s", localIP, audioPort)
+	//audioListener, err := net.Listen("tcp", audioPort)
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
+	//defer audioListener.Close()
+
+	log.Printf("Servidor iniciado en %s%s (frames), %s%s (eventos) y %s%s (audio)",
+		localIP, framePort, localIP, eventPort, localIP, audioPort)
+	log.Println("Esperando conexión del cliente...")
+
+	// WaitGroup para mantener el programa en ejecución
+	var wg sync.WaitGroup
+	wg.Add(3) // Para los tres servidores
+	chan_addr := make(chan string, 1)
+
+	// Aceptar conexiones de eventos
+	go func() {
+		defer wg.Done()
+		for {
+			conn, err := eventListener.Accept()
+			if err != nil {
+				log.Printf("Error al aceptar conexión de eventos: %v", err)
+				continue
+			}
+			chan_addr <- conn.RemoteAddr().String()
+			log.Printf("Cliente conectado para eventos desde %s", conn.RemoteAddr())
+			go handleEvents(conn)
+		}
+	}()
+
+	// Aceptar conexiones de frames
+	go func() {
+		defer wg.Done()
+		for {
+			conn, err := frameListener.Accept()
+			if err != nil {
+				log.Printf("Error al aceptar conexión de frames: %v", err)
+				continue
+			}
+			log.Printf("Cliente conectado para frames desde %s", conn.RemoteAddr())
+			go handleConnection(conn)
+		}
+	}()
+
+
+	go func() {
+		defer wg.Done()
+		for {
+			println("Reached")
+			client_addr := strings.Split(<-chan_addr, ":")[0]
+			// ffmpeg -re -f pulse -i alsa_output.pci-0000_08_00.1.hdmi-stereo-extra3.monitor -f rtsp rtsp://192.168.2.192:8888
+			cmd := exec.Command(
+				"ffmpeg",
+				"-re",             // Leer entrada a la tasa de fotogramas nativa
+				"-f", "pulse",     // Usar PulseAudio
+				"-i", GetDefaultSink(), // Usar el monitor de la salida de audio por defecto
+				"-f", "rtsp",       // Formato de salida: rtp
+				"rtsp://"+client_addr+":8888", // Dirección RTSP del cliente
+			)
+			time.Sleep(1e9 * 4)
+			go cmd.Run()
+		}
+	}()
+
+	// Aceptar conexiones de audio
+	//go func() {
+	//	defer wg.Done()
+	//	for {
+	//		conn, err := audioListener.Accept()
+	//		if err != nil {
+	//			log.Printf("Error al aceptar conexión de audio: %v", err)
+	//			continue
+	//		}
+	//		log.Printf("Cliente conectado para audio desde %s", conn.RemoteAddr())
+	//		go handleAudioConnection(conn)
+	//	}
+	//}()
+
+	// Esperar indefinidamente
+	wg.Wait()
 }

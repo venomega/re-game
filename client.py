@@ -9,6 +9,7 @@ import sys
 import threading
 from collections import deque
 import queue
+import os
 
 # Constantes para tipos de eventos
 EVENT_KEYDOWN = 1
@@ -22,15 +23,19 @@ class ScreenShareViewer:
     def __init__(self, width, height, event_socket):
         # Inicializar SDL
         sdl2.ext.init()
-        
+
+        # Guardar dimensiones originales del servidor
+        self.server_width = width
+        self.server_height = height
+
         # Crear ventana
         self.window = sdl2.ext.Window("Screen Share", size=(width, height))
         self.window.show()
-        
+
         # Crear renderer
         self.renderer = sdl2.ext.Renderer(self.window)
         self.renderer.clear(sdl2.ext.Color(0, 0, 0))
-        
+
         # Crear textura con formato RGB24
         self.texture = sdl2.SDL_CreateTexture(
             self.renderer.sdlrenderer,
@@ -39,30 +44,30 @@ class ScreenShareViewer:
             width,
             height
         )
-        
+
         # Variables para FPS
         self.frame_count = 0
         self.start_time = time.time()
         self.fps = 0
         self.last_frame_time = time.time()
-        
+
         # Tamaño de la ventana
         self.window_width = width
         self.window_height = height
-        
+
         # Buffer de frames circular
         self.frame_buffer = deque(maxlen=60)  # Buffer de 60 frames
         self.running = True
         self.buffer_lock = threading.Lock()
-        
+
         # Pre-asignar buffer para RGB
         self.rgb_buffer = np.zeros((height, width, 3), dtype=np.uint8)
-        
+
         # Socket para eventos
         self.event_socket = event_socket
-        
+
         # Buffer de eventos y thread
-        self.event_queue = queue.Queue(maxsize=1000)  # Buffer de eventos
+        self.event_queue = queue.Queue(maxsize=9)
         self.event_thread = threading.Thread(target=self._event_sender)
         self.event_thread.daemon = True
         self.event_thread.start()
@@ -84,8 +89,9 @@ class ScreenShareViewer:
         try:
             # Crear el paquete de evento
             event_data = struct.pack('<B', event_type) + data
+            self.event_socket.sendall(event_data)
             # Intentar agregar al buffer sin bloquear
-            self.event_queue.put_nowait(event_data)
+            # self.event_queue.put_nowait(event_data)
         except queue.Full:
             # Si el buffer está lleno, descartar el evento más antiguo
             try:
@@ -109,8 +115,22 @@ class ScreenShareViewer:
                 data = struct.pack('<I', event.key.keysym.sym)
                 self.send_event(EVENT_KEYUP, data)
             elif event.type == sdl2.SDL_MOUSEMOTION:
-                # Enviar evento de movimiento del ratón
-                data = struct.pack('<ii', event.motion.x, event.motion.y)
+                # Obtener el tamaño actual de la ventana
+                window_size = self.window.size
+
+                # Calcular factores de escala
+                scale_x = self.server_width / window_size[0]
+                scale_y = self.server_height / window_size[1]
+
+                # Escalar los movimientos relativos
+                rel_x = int(event.motion.xrel * scale_x)
+                rel_y = int(event.motion.yrel * scale_y)
+
+                # Debug: Imprimir valores
+                print(f"Mouse motion - window: {window_size}, scale: ({scale_x:.2f}, {scale_y:.2f}), rel: ({rel_x}, {rel_y})")
+
+                # Enviar evento de movimiento del ratón con coordenadas escaladas
+                data = struct.pack('<ii', rel_x, rel_y)
                 self.send_event(EVENT_MOUSEMOTION, data)
             elif event.type == sdl2.SDL_MOUSEBUTTONDOWN:
                 # Enviar evento de botón del ratón presionado
@@ -133,17 +153,17 @@ class ScreenShareViewer:
             frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
             if frame is None:
                 return
-            
+
             # Obtener el tamaño actual de la ventana
             window_size = self.window.size
             if window_size != (self.window_width, self.window_height):
                 # Redimensionar la imagen al tamaño de la ventana
                 frame = cv2.resize(frame, window_size, interpolation=cv2.INTER_LINEAR)
                 self.window_width, self.window_height = window_size
-            
+
             # Convertir BGR a RGB usando buffer pre-asignado
             cv2.cvtColor(frame, cv2.COLOR_BGR2RGB, dst=self.rgb_buffer)
-            
+
             # Actualizar textura
             sdl2.SDL_UpdateTexture(
                 self.texture,
@@ -151,10 +171,10 @@ class ScreenShareViewer:
                 self.rgb_buffer.tobytes(),
                 self.rgb_buffer.shape[1] * 3
             )
-            
+
             # Limpiar renderer
             self.renderer.clear()
-            
+
             # Dibujar textura
             sdl2.SDL_RenderCopy(
                 self.renderer.sdlrenderer,
@@ -163,21 +183,21 @@ class ScreenShareViewer:
                 None
             )
             sdl2.SDL_RenderPresent(self.renderer.sdlrenderer)
-            
+
             # Calcular FPS y latencia
             self.frame_count += 1
             current_time = time.time()
             elapsed_time = current_time - self.start_time
             latency = (current_time - self.last_frame_time) * 1000  # ms
-            
+
             if elapsed_time >= 1.0:
                 self.fps = self.frame_count / elapsed_time
                 print(f"FPS: {self.fps:.1f}, Latencia: {latency:.1f}ms")
                 self.frame_count = 0
                 self.start_time = current_time
-            
+
             self.last_frame_time = current_time
-            
+
         except Exception as e:
             print(f"Error procesando frame: {e}")
 
@@ -189,12 +209,12 @@ class ScreenShareViewer:
 def receive_frames(client, viewer):
     # Pre-asignar buffer para recepción
     receive_buffer = bytearray(1024 * 1024)  # 1MB buffer
-    
+
     while viewer.running:
         try:
             # Recibir tamaño del frame comprimido
             frame_size = struct.unpack('<I', client.recv(4))[0]
-            
+
             # Recibir frame comprimido usando buffer pre-asignado
             bytes_received = 0
             while bytes_received < frame_size:
@@ -211,22 +231,25 @@ def receive_frames(client, viewer):
         except Exception as e:
             print(f"Error recibiendo frames: {e}")
             break
+def receive_audio():
+            os.system("ffplay -rtsp_flags listen rtsp://192.168.2.192:8888 -nodisp")
+
 
 def main():
     # Conectar al servidor para frames
     frame_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # Conectar al servidor para eventos
     event_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    
+
     server_ip = ""
     try:
         server_ip = sys.argv[1]
     except:
         print("Uso: python client.py <IP_DEL_SERVIDOR>")
         sys.exit(1)
-    
+
     frame_socket.connect((server_ip, 8080))
-    event_socket.connect((server_ip, 8081))  # Puerto diferente para eventos
+    event_socket.connect((server_ip, 8081))
 
     # Recibir dimensiones de la pantalla
     width = struct.unpack('<I', frame_socket.recv(4))[0]
@@ -238,8 +261,13 @@ def main():
 
     # Iniciar thread de recepción de frames
     receive_thread = threading.Thread(target=receive_frames, args=(frame_socket, viewer))
-    receive_thread.daemon = True
+    receive_thread.daemon = False
     receive_thread.start()
+
+    # Iniciar thread de audio
+    #audio_thread = threading.Thread(target=receive_audio)
+    #audio_thread.daemon = False
+    #audio_thread.start()
 
     try:
         running = True

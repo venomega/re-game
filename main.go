@@ -20,6 +20,7 @@ import (
 
 	"github.com/kbinani/screenshot"
 	"github.com/go-vgo/robotgo"
+	"github.com/bendahl/uinput"
 )
 
 const (
@@ -328,6 +329,8 @@ var mouseGrab = struct {
 	sync.Mutex
 }{}
 
+var virtualMouse uinput.Mouse
+
 func getKeyName(keyCode uint32) string {
 	if name, ok := keyMap[keyCode]; ok {
 		return name
@@ -630,6 +633,8 @@ func handleEventConnection(conn net.Conn) {
 	// Buffer para recibir eventos
 	eventBuffer := make([]byte, 9) // Máximo tamaño de evento (mouse motion)
 
+	var lastX, lastY int
+
 	for {
 		// Leer tipo de evento
 		_, err := io.ReadFull(conn, eventBuffer[:1])
@@ -667,9 +672,13 @@ func handleEventConnection(conn net.Conn) {
 			}
 			x := int(int16(binary.LittleEndian.Uint16(eventBuffer[1:3])))
 			y := int(int16(binary.LittleEndian.Uint16(eventBuffer[3:5])))
-			//rel_x := int16(binary.LittleEndian.Uint16(eventBuffer[5:7]))
-			//rel_y := int16(binary.LittleEndian.Uint16(eventBuffer[7:9]))
-			robotgo.MoveMouse(x, y)
+			rel_x := int(int16(binary.LittleEndian.Uint16(eventBuffer[5:7])))
+			rel_y := int(int16(binary.LittleEndian.Uint16(eventBuffer[7:9])))
+			// Usar movimiento relativo
+			if rel_x != 0 || rel_y != 0 {
+				virtualMouse.Move(int32(rel_x), int32(rel_y))
+			}
+			lastX, lastY = x, y
 		case EVENT_MOUSEBUTTONDOWN, EVENT_MOUSEBUTTONUP:
 			// Leer 5 bytes: button (uint8), x, y (int16)
 			_, err := io.ReadFull(conn, eventBuffer[1:6])
@@ -680,18 +689,31 @@ func handleEventConnection(conn net.Conn) {
 			button := eventBuffer[1]
 			x := int(int16(binary.LittleEndian.Uint16(eventBuffer[2:4])))
 			y := int(int16(binary.LittleEndian.Uint16(eventBuffer[4:6])))
-			// Mover mouse antes de click
-			robotgo.Move(x, y)
-			btn := "left"
-			if button == 3 {
-				btn = "right"
-			} else if button == 2 {
-				btn = "middle"
+			// Mover mouse relativo si es necesario
+			dx := x - lastX
+			dy := y - lastY
+			if dx != 0 || dy != 0 {
+				virtualMouse.Move(int32(dx), int32(dy))
+				lastX, lastY = x, y
 			}
-			if eventType == EVENT_MOUSEBUTTONDOWN {
-				robotgo.MouseDown( btn)
-			} else {
-				robotgo.MouseUp( btn)
+			if button == 1 {
+				if eventType == EVENT_MOUSEBUTTONDOWN {
+					virtualMouse.LeftPress()
+				} else {
+					virtualMouse.LeftRelease()
+				}
+			} else if button == 3 {
+				if eventType == EVENT_MOUSEBUTTONDOWN {
+					virtualMouse.RightPress()
+				} else {
+					virtualMouse.RightRelease()
+				}
+			} else if button == 2 {
+				if eventType == EVENT_MOUSEBUTTONDOWN {
+					virtualMouse.MiddlePress()
+				} else {
+					virtualMouse.MiddleRelease()
+				}
 			}
 		case EVENT_MOUSEWHEEL:
 			// Leer 4 bytes: x, y (int16)
@@ -703,10 +725,10 @@ func handleEventConnection(conn net.Conn) {
 			x := int(int16(binary.LittleEndian.Uint16(eventBuffer[1:3])))
 			y := int(int16(binary.LittleEndian.Uint16(eventBuffer[3:5])))
 			if y != 0 {
-				robotgo.Scroll(x, y)
+				virtualMouse.Wheel(false, int32(y))
 			}
 			if x != 0 {
-				robotgo.Scroll(x, y)
+				virtualMouse.Wheel(true, int32(x))
 			}
 		}
 	}
@@ -785,6 +807,12 @@ func main() {
 	wg.Add(3) // Para los tres servidores
 	chan_addr := make(chan string, 1)
 
+	// Crear mouse virtual global
+	virtualMouse, err = uinput.CreateMouse("/dev/uinput", []byte("screenshare-mouse"))
+	if err != nil {
+		log.Fatalf("No se pudo crear mouse virtual: %v", err)
+	}
+	defer virtualMouse.Close()
 
 	// Aceptar conexiones de frames
 	go func() {

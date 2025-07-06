@@ -72,6 +72,11 @@ class ScreenShareViewer:
         self.event_thread.daemon = True
         self.event_thread.start()
 
+        # Iniciar thread de eventos
+        self.event_processor_thread = threading.Thread(target=self._process_events)
+        self.event_processor_thread.daemon = True
+        self.event_processor_thread.start()
+
     def _event_sender(self):
         """Thread dedicado para enviar eventos al servidor"""
         while self.running:
@@ -84,67 +89,50 @@ class ScreenShareViewer:
                 print(f"Error enviando evento: {e}")
                 break
 
-    def send_event(self, event_type, data):
-        """Agrega un evento al buffer de eventos"""
-        try:
-            # Crear el paquete de evento
-            event_data = struct.pack('<B', event_type) + data
-            self.event_socket.sendall(event_data)
-            # Intentar agregar al buffer sin bloquear
-            # self.event_queue.put_nowait(event_data)
-        except queue.Full:
-            # Si el buffer está lleno, descartar el evento más antiguo
-            try:
-                self.event_queue.get_nowait()
-                self.event_queue.put_nowait(event_data)
-            except:
-                pass
 
-    def handle_events(self):
-        for event in sdl2.ext.get_events():
-            if event.type == sdl2.SDL_QUIT:
-                return False
-            elif event.type == sdl2.SDL_KEYDOWN:
-                if event.key.keysym.sym == sdl2.SDLK_ESCAPE:
-                    return False
-                # Enviar evento de tecla presionada
-                data = struct.pack('<I', event.key.keysym.sym)
-                self.send_event(EVENT_KEYDOWN, data)
-            elif event.type == sdl2.SDL_KEYUP:
-                # Enviar evento de tecla liberada
-                data = struct.pack('<I', event.key.keysym.sym)
-                self.send_event(EVENT_KEYUP, data)
-            elif event.type == sdl2.SDL_MOUSEMOTION:
-                # Obtener el tamaño actual de la ventana
-                window_size = self.window.size
-
-                # Calcular factores de escala
-                scale_x = self.server_width / window_size[0]
-                scale_y = self.server_height / window_size[1]
-
-                # Escalar los movimientos relativos
-                rel_x = int(event.motion.xrel * scale_x)
-                rel_y = int(event.motion.yrel * scale_y)
-
-                # Debug: Imprimir valores
-                print(f"Mouse motion - window: {window_size}, scale: ({scale_x:.2f}, {scale_y:.2f}), rel: ({rel_x}, {rel_y})")
-
-                # Enviar evento de movimiento del ratón con coordenadas escaladas
-                data = struct.pack('<ii', rel_x, rel_y)
-                self.send_event(EVENT_MOUSEMOTION, data)
-            elif event.type == sdl2.SDL_MOUSEBUTTONDOWN:
-                # Enviar evento de botón del ratón presionado
-                data = struct.pack('<B', event.button.button)
-                self.send_event(EVENT_MOUSEBUTTONDOWN, data)
-            elif event.type == sdl2.SDL_MOUSEBUTTONUP:
-                # Enviar evento de botón del ratón liberado
-                data = struct.pack('<B', event.button.button)
-                self.send_event(EVENT_MOUSEBUTTONUP, data)
-            elif event.type == sdl2.SDL_MOUSEWHEEL:
-                # Enviar evento de rueda del ratón
-                data = struct.pack('<i', event.wheel.y)
-                self.send_event(EVENT_MOUSEWHEEL, data)
-        return True
+    def _process_events(self):
+        """Thread dedicado para procesar eventos SDL"""
+        while self.running:
+            events = sdl2.ext.get_events()
+            for event in events:
+                if event.type == sdl2.SDL_QUIT:
+                    self.running = False
+                    break
+                elif event.type == sdl2.SDL_KEYDOWN:
+                    key_data = struct.pack('<I', event.key.keysym.sym)
+                    self.event_socket.sendall(struct.pack('<B', EVENT_KEYDOWN) + key_data)
+                elif event.type == sdl2.SDL_KEYUP:
+                    key_data = struct.pack('<I', event.key.keysym.sym)
+                    self.event_socket.sendall(struct.pack('<B', EVENT_KEYUP) + key_data)
+                elif event.type == sdl2.SDL_MOUSEMOTION:
+                    # Enviar evento de movimiento de mouse
+                    x = event.motion.x
+                    y = event.motion.y
+                    rel_x = event.motion.xrel
+                    rel_y = event.motion.yrel
+                    data = struct.pack('<Bhhhh', EVENT_MOUSEMOTION, x, y, rel_x, rel_y)
+                    self.event_socket.sendall(data)
+                elif event.type == sdl2.SDL_MOUSEBUTTONDOWN:
+                    # Enviar evento de botón presionado
+                    button = event.button.button
+                    x = event.button.x
+                    y = event.button.y
+                    data = struct.pack('<BBhh', EVENT_MOUSEBUTTONDOWN, button, x, y)
+                    self.event_socket.sendall(data)
+                elif event.type == sdl2.SDL_MOUSEBUTTONUP:
+                    # Enviar evento de botón liberado
+                    button = event.button.button
+                    x = event.button.x
+                    y = event.button.y
+                    data = struct.pack('<BBhh', EVENT_MOUSEBUTTONUP, button, x, y)
+                    self.event_socket.sendall(data)
+                elif event.type == sdl2.SDL_MOUSEWHEEL:
+                    # Enviar evento de rueda del mouse
+                    x = event.wheel.x
+                    y = event.wheel.y
+                    data = struct.pack('<Bhh', EVENT_MOUSEWHEEL, x, y)
+                    self.event_socket.sendall(data)
+            time.sleep(0.0001)  # Pequeña pausa para no saturar la CPU
 
     def update_frame(self, frame_data):
         try:
@@ -231,9 +219,9 @@ def receive_frames(client, viewer):
         except Exception as e:
             print(f"Error recibiendo frames: {e}")
             break
-def receive_audio():
-            os.system("ffplay -rtsp_flags listen rtsp://192.168.2.192:8888 -nodisp")
 
+def receive_audio():
+    os.system("ffplay -rtsp_flags listen rtsp://192.168.2.192:8888 -nodisp")
 
 def main():
     # Conectar al servidor para frames
@@ -272,9 +260,6 @@ def main():
     try:
         running = True
         while running:
-            # Procesar eventos SDL
-            running = viewer.handle_events()
-
             # Procesar frames del buffer circular
             with viewer.buffer_lock:
                 if viewer.frame_buffer:

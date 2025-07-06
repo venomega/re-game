@@ -18,8 +18,8 @@ import (
 
 	"bufio"
 
-	"github.com/go-vgo/robotgo"
 	"github.com/kbinani/screenshot"
+	"github.com/go-vgo/robotgo"
 )
 
 const (
@@ -336,179 +336,6 @@ func getKeyName(keyCode uint32) string {
 	return string(rune(keyCode))
 }
 
-func handleEvents(conn net.Conn) {
-	defer conn.Close()
-
-	// Crear buffer de eventos
-	eventBuffer := NewEventBuffer(eventBufferSize)
-
-	// Variables para el control del mouse
-	var lastTime time.Time
-
-	// Iniciar thread de procesamiento de eventos
-	go func() {
-		for {
-			event := eventBuffer.Get()
-			println("Reached: ", event.Type, binary.LittleEndian.Uint32(event.Data) , "KC", getKeyName(binary.LittleEndian.Uint32(event.Data)))
-			switch event.Type {
-			case EVENT_KEYDOWN:
-				keyCode := binary.LittleEndian.Uint32(event.Data)
-				keyName := getKeyName(keyCode)
-
-				// Actualizar estado de modificadores
-				modifierState.Lock()
-				switch keyName {
-				case "ctrl":
-					modifierState.ctrl = true
-				case "alt":
-					modifierState.alt = true
-				case "super":
-					modifierState.super = true
-				case "shift":
-					modifierState.shift = true
-				}
-				modifierState.Unlock()
-
-				// Presionar tecla
-				robotgo.KeyDown(keyName)
-			case EVENT_KEYUP:
-				keyCode := binary.LittleEndian.Uint32(event.Data)
-				keyName := getKeyName(keyCode)
-
-				// Actualizar estado de modificadores
-				modifierState.Lock()
-				switch keyName {
-				case "ctrl":
-					modifierState.ctrl = false
-				case "alt":
-					modifierState.alt = false
-				case "super":
-					modifierState.super = false
-				case "shift":
-					modifierState.shift = false
-				}
-				modifierState.Unlock()
-
-				// Liberar tecla
-				robotgo.KeyUp(keyName)
-			case EVENT_MOUSEMOTION:
-				now := time.Now()
-				relX := int(binary.LittleEndian.Uint32(event.Data[:4]))
-				relY := int(binary.LittleEndian.Uint32(event.Data[4:8]))
-
-				// Debug: Imprimir valores recibidos
-				log.Printf("Mouse motion received - relX: %d, relY: %d", relX, relY)
-
-				// Obtener la posición actual del mouse
-				currentX, currentY := robotgo.GetMousePos()
-
-				// Calcular el tiempo transcurrido en segundos
-				elapsed := now.Sub(lastTime).Seconds()
-				if elapsed == 0 {
-					continue // Evitar división por cero
-				}
-
-				// Aplicar un factor de sensibilidad fijo para mejor control
-				sensitivity := 1.0 // Ya no necesitamos reducir la sensibilidad porque ya está escalada
-
-				// Calcular el movimiento final
-				moveX := int(float64(relX) * sensitivity)
-				moveY := int(float64(relY) * sensitivity)
-
-				// Solo mover si hay un cambio significativo
-				if moveX != 0 || moveY != 0 {
-					// Debug: Imprimir movimiento calculado
-					log.Printf("Moving mouse - current: (%d,%d), move: (%d,%d)", currentX, currentY, moveX, moveY)
-
-					// Mover el mouse relativamente
-					robotgo.MoveMouse(currentX + moveX, currentY + moveY)
-					lastTime = now
-				}
-			case EVENT_MOUSEBUTTONDOWN:
-				button := event.Data[0]
-				switch button {
-				case 1: // Izquierdo
-					robotgo.MouseDown("left")
-				case 2: // Medio
-					robotgo.MouseDown("center")
-				case 3: // Derecho
-					robotgo.MouseDown("right")
-				}
-			case EVENT_MOUSEBUTTONUP:
-				button := event.Data[0]
-				switch button {
-				case 1: // Izquierdo
-					robotgo.MouseUp("left")
-				case 2: // Medio
-					robotgo.MouseUp("center")
-				case 3: // Derecho
-					robotgo.MouseUp("right")
-				}
-			case EVENT_MOUSEWHEEL:
-				scroll := int(binary.LittleEndian.Uint32(event.Data))
-				if scroll > 0 {
-					robotgo.Scroll(scroll, 0)  // 0 para arriba
-				} else {
-					robotgo.Scroll(-scroll, 1)  // 1 para abajo
-				}
-			}
-		}
-	}()
-
-	// Buffer para recibir eventos
-	buf := make([]byte, 1024)
-
-	for {
-		// Recibir tipo de evento
-		_, err := conn.Read(buf[:1])
-		if err != nil {
-			log.Printf("Error recibiendo tipo de evento: %v", err)
-			return
-		}
-
-		eventType := buf[0]
-		var eventData []byte
-
-		// Recibir datos del evento según el tipo
-		switch eventType {
-		case EVENT_KEYDOWN, EVENT_KEYUP:
-			_, err := conn.Read(buf[:4])
-			if err != nil {
-				log.Printf("Error recibiendo código de tecla: %v", err)
-				return
-			}
-			eventData = make([]byte, 4)
-			copy(eventData, buf[:4])
-		case EVENT_MOUSEMOTION:
-			_, err := conn.Read(buf[:8])
-			if err != nil {
-				log.Printf("Error recibiendo coordenadas del ratón: %v", err)
-				return
-			}
-			eventData = make([]byte, 8)
-			copy(eventData, buf[:8])
-		case EVENT_MOUSEBUTTONDOWN, EVENT_MOUSEBUTTONUP:
-			_, err := conn.Read(buf[:1])
-			if err != nil {
-				log.Printf("Error recibiendo botón del ratón: %v", err)
-				return
-			}
-			eventData = make([]byte, 1)
-			copy(eventData, buf[:1])
-		case EVENT_MOUSEWHEEL:
-			_, err := conn.Read(buf[:4])
-			if err != nil {
-				log.Printf("Error recibiendo dirección de la rueda: %v", err)
-				return
-			}
-			eventData = make([]byte, 4)
-			copy(eventData, buf[:4])
-		}
-
-		// Agregar evento al buffer
-		eventBuffer.Add(Event{Type: eventType, Data: eventData})
-	}
-}
 
 // Mutex global para sincronizar la captura de pantalla
 var captureMutex sync.Mutex
@@ -796,6 +623,95 @@ func handleAudioConnection(conn net.Conn) {
 	}
 }
 
+func handleEventConnection(conn net.Conn) {
+	defer conn.Close()
+	log.Printf("Cliente conectado para eventos desde %s", conn.RemoteAddr())
+
+	// Buffer para recibir eventos
+	eventBuffer := make([]byte, 9) // Máximo tamaño de evento (mouse motion)
+
+	for {
+		// Leer tipo de evento
+		_, err := io.ReadFull(conn, eventBuffer[:1])
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("Error leyendo tipo de evento: %v", err)
+			}
+			return
+		}
+		eventType := eventBuffer[0]
+
+		switch eventType {
+		case EVENT_KEYDOWN, EVENT_KEYUP:
+			// Leer 4 bytes de datos
+			_, err := io.ReadFull(conn, eventBuffer[1:5])
+			if err != nil {
+				log.Printf("Error leyendo datos de evento de teclado: %v", err)
+				return
+			}
+			keyCode := binary.LittleEndian.Uint32(eventBuffer[1:5])
+			keyName := getKeyName(keyCode)
+			if eventType == EVENT_KEYDOWN {
+				log.Printf("Tecla presionada: %s", keyName)
+				robotgo.KeyDown(keyName)
+			} else {
+				log.Printf("Tecla liberada: %s", keyName)
+				robotgo.KeyUp(keyName)
+			}
+		case EVENT_MOUSEMOTION:
+			// Leer 8 bytes: x, y, rel_x, rel_y (int16)
+			_, err := io.ReadFull(conn, eventBuffer[1:9])
+			if err != nil {
+				log.Printf("Error leyendo datos de mouse motion: %v", err)
+				return
+			}
+			x := int(int16(binary.LittleEndian.Uint16(eventBuffer[1:3])))
+			y := int(int16(binary.LittleEndian.Uint16(eventBuffer[3:5])))
+			//rel_x := int16(binary.LittleEndian.Uint16(eventBuffer[5:7]))
+			//rel_y := int16(binary.LittleEndian.Uint16(eventBuffer[7:9]))
+			robotgo.MoveMouse(x, y)
+		case EVENT_MOUSEBUTTONDOWN, EVENT_MOUSEBUTTONUP:
+			// Leer 5 bytes: button (uint8), x, y (int16)
+			_, err := io.ReadFull(conn, eventBuffer[1:6])
+			if err != nil {
+				log.Printf("Error leyendo datos de mouse button: %v", err)
+				return
+			}
+			button := eventBuffer[1]
+			x := int(int16(binary.LittleEndian.Uint16(eventBuffer[2:4])))
+			y := int(int16(binary.LittleEndian.Uint16(eventBuffer[4:6])))
+			// Mover mouse antes de click
+			robotgo.Move(x, y)
+			btn := "left"
+			if button == 3 {
+				btn = "right"
+			} else if button == 2 {
+				btn = "middle"
+			}
+			if eventType == EVENT_MOUSEBUTTONDOWN {
+				robotgo.MouseDown( btn)
+			} else {
+				robotgo.MouseUp( btn)
+			}
+		case EVENT_MOUSEWHEEL:
+			// Leer 4 bytes: x, y (int16)
+			_, err := io.ReadFull(conn, eventBuffer[1:5])
+			if err != nil {
+				log.Printf("Error leyendo datos de mouse wheel: %v", err)
+				return
+			}
+			x := int(int16(binary.LittleEndian.Uint16(eventBuffer[1:3])))
+			y := int(int16(binary.LittleEndian.Uint16(eventBuffer[3:5])))
+			if y != 0 {
+				robotgo.Scroll(x, y)
+			}
+			if x != 0 {
+				robotgo.Scroll(x, y)
+			}
+		}
+	}
+}
+
 func CheckErr(err error, text string){
 	if err != nil{
 		println("ERROR:", text, err.Error())
@@ -817,7 +733,6 @@ func GetDefaultSink() string{
 }
 
 func main() {
-	GetDefaultSink()
 	// Obtener la IP local
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -870,20 +785,6 @@ func main() {
 	wg.Add(3) // Para los tres servidores
 	chan_addr := make(chan string, 1)
 
-	// Aceptar conexiones de eventos
-	go func() {
-		defer wg.Done()
-		for {
-			conn, err := eventListener.Accept()
-			if err != nil {
-				log.Printf("Error al aceptar conexión de eventos: %v", err)
-				continue
-			}
-			chan_addr <- conn.RemoteAddr().String()
-			log.Printf("Cliente conectado para eventos desde %s", conn.RemoteAddr())
-			go handleEvents(conn)
-		}
-	}()
 
 	// Aceptar conexiones de frames
 	go func() {
@@ -932,6 +833,20 @@ func main() {
 	//		go handleAudioConnection(conn)
 	//	}
 	//}()
+
+	// Aceptar conexiones de eventos
+	go func() {
+		defer wg.Done()
+		for {
+			conn, err := eventListener.Accept()
+			if err != nil {
+				log.Printf("Error al aceptar conexión de eventos: %v", err)
+				continue
+			}
+			log.Printf("Cliente conectado para eventos desde %s", conn.RemoteAddr())
+			go handleEventConnection(conn)
+		}
+	}()
 
 	// Esperar indefinidamente
 	wg.Wait()

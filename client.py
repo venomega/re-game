@@ -77,6 +77,10 @@ class ScreenShareViewer:
         self.event_processor_thread.daemon = True
         self.event_processor_thread.start()
 
+        # Estado de modo relativo
+        self.relative_mouse_mode = True
+        sdl2.SDL_SetRelativeMouseMode(True)
+
     def _event_sender(self):
         """Thread dedicado para enviar eventos al servidor"""
         while self.running:
@@ -99,6 +103,18 @@ class ScreenShareViewer:
                     self.running = False
                     break
                 elif event.type == sdl2.SDL_KEYDOWN:
+                    # Alternar Ctrl+g para capturar/liberar el mouse
+                    if (event.key.keysym.sym == ord('g') or event.key.keysym.sym == ord('G')) and (event.key.keysym.mod & (sdl2.KMOD_LCTRL | sdl2.KMOD_RCTRL)):
+                        self.relative_mouse_mode = not self.relative_mouse_mode
+                        sdl2.SDL_SetRelativeMouseMode(self.relative_mouse_mode)
+                        print(f"[INFO] Mouse {'capturado' if self.relative_mouse_mode else 'liberado'} (relative mode {'ON' if self.relative_mouse_mode else 'OFF'})")
+                        # Si se libera el mouse, sincronizar la posición real con la última posición virtual
+                        if not self.relative_mouse_mode:
+                            try:
+                                # Warp el mouse a la última posición conocida
+                                sdl2.SDL_WarpMouseInWindow(self.window.window, event.motion.x, event.motion.y)
+                            except Exception:
+                                pass
                     key_data = struct.pack('<I', event.key.keysym.sym)
                     self.event_socket.sendall(struct.pack('<B', EVENT_KEYDOWN) + key_data)
                 elif event.type == sdl2.SDL_KEYUP:
@@ -221,7 +237,7 @@ def receive_frames(client, viewer):
             break
 
 def receive_audio():
-    os.system("ffplay -rtsp_flags listen rtsp://192.168.2.192:8888 -nodisp")
+    os.system("ffplay -rtsp_flags listen rtsp://192.168.2.192:8888 -nodisp").read()
 
 def main():
     # Conectar al servidor para frames
@@ -253,9 +269,9 @@ def main():
     receive_thread.start()
 
     # Iniciar thread de audio
-    #audio_thread = threading.Thread(target=receive_audio)
-    #audio_thread.daemon = False
-    #audio_thread.start()
+    audio_thread = threading.Thread(target=receive_audio)
+    audio_thread.daemon = False
+    audio_thread.start()
 
     try:
         running = True

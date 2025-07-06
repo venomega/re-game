@@ -819,6 +819,7 @@ func main() {
 		defer wg.Done()
 		for {
 			conn, err := frameListener.Accept()
+			chan_addr <- conn.RemoteAddr().String()
 			if err != nil {
 				log.Printf("Error al aceptar conexión de frames: %v", err)
 				continue

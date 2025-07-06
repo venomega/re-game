@@ -24,14 +24,14 @@ import (
 )
 
 const (
-	frameRate = 120  // Aumentamos a 120 FPS para mejor rendimiento
+	frameRate = 60  // FPS realista para baja latencia
 	frameDuration = time.Second / frameRate
 	framePort = ":8080"
 	eventPort = ":8081"
 	audioPort = ":8082"  // Puerto para streaming de audio
 	maxBufferSize = 1024 * 1024 // 1MB buffer
-	bufferSize = 1 // Mantenemos 1 frame para mínima latencia
-	jpegQuality = 35 // Reducimos calidad para mejor rendimiento
+	bufferSize = 1 // Buffer de 1 frame para mínima latencia
+	jpegQuality = 40 // Mejor balance calidad/velocidad
 	eventBufferSize = 1
 	audioSampleRate = 48000 // Tasa de muestreo de audio actualizada a 48kHz
 	audioChannels = 2       // Audio estéreo
@@ -431,10 +431,10 @@ func handleConnection(conn net.Conn) {
 		}
 		lastFrameTime = time.Now()
 
-		// Mantener el framerate
+		// Mantener el framerate (pero sin sleep si la red es el cuello de botella)
 		elapsed := time.Since(startTime)
 		if elapsed < frameDuration {
-			time.Sleep(frameDuration - elapsed)
+			// time.Sleep(frameDuration - elapsed) // Puedes comentar esto para máxima velocidad
 		}
 	}
 }

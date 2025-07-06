@@ -56,7 +56,7 @@ class ScreenShareViewer:
         self.window_height = height
 
         # Buffer de frames circular
-        self.frame_buffer = deque(maxlen=60)  # Buffer de 60 frames
+        self.frame_buffer = deque(maxlen=1)  # Solo el último frame para mínima latencia
         self.running = True
         self.buffer_lock = threading.Lock()
 
@@ -237,7 +237,7 @@ def receive_frames(client, viewer):
             break
 
 def receive_audio():
-    os.system("ffplay -rtsp_flags listen rtsp://192.168.2.192:8888 -nodisp").read()
+    os.system("ffplay -rtsp_flags listen rtsp://192.168.2.192:8888 -nodisp")
 
 def main():
     # Conectar al servidor para frames
@@ -276,10 +276,11 @@ def main():
     try:
         running = True
         while running:
-            # Procesar frames del buffer circular
+            # Procesar solo el frame más reciente y descartar los viejos
             with viewer.buffer_lock:
                 if viewer.frame_buffer:
-                    frame_data = viewer.frame_buffer.popleft()
+                    frame_data = viewer.frame_buffer.pop()  # Toma el más reciente
+                    viewer.frame_buffer.clear()  # Descarta los viejos
                     viewer.update_frame(frame_data)
 
     except Exception as e:

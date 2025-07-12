@@ -15,12 +15,13 @@ import (
 	"sync"
 	"time"
 	"strings"
+	"fmt"
 
 	"bufio"
 
 	"github.com/kbinani/screenshot"
 	"github.com/go-vgo/robotgo"
-	"github.com/bendahl/uinput"
+	"github.com/ThomasT75/uinput"
 )
 
 const (
@@ -46,6 +47,8 @@ const (
 	EVENT_MOUSEBUTTONDOWN = 4
 	EVENT_MOUSEBUTTONUP = 5
 	EVENT_MOUSEWHEEL = 6
+	EVENT_JOYSTICK = 10
+	EVENT_JOYSTICK_CAPS = 11
 )
 
 // Estructura para eventos
@@ -362,34 +365,34 @@ func handleConnection(conn net.Conn) {
 	frameChan := make(chan image.Image, 1)
 
 	// Iniciar thread de captura
-	go func() {
-		lastCapture := time.Now()
-		for {
-			// Control de framerate para la captura
-			elapsed := time.Since(lastCapture)
-			if elapsed < frameDuration {
-				time.Sleep(frameDuration - elapsed)
-			}
-			lastCapture = time.Now()
+	//go func(){
+	//	lastCapture := time.Now()
+	//	for {
+	//		// Control de framerate para la captura
+	//		elapsed := time.Since(lastCapture)
+	//		if elapsed < frameDuration {
+	//			time.Sleep(frameDuration - elapsed)
+	//		}
+	//		lastCapture = time.Now()
 
-			// Captura de pantalla con mutex
-			captureMutex.Lock()
-			img, err := screenshot.CaptureDisplay(0)
-			captureMutex.Unlock()
+	//		// Captura de pantalla con mutex
+	//		captureMutex.Lock()
+	//		img, err := screenshot.CaptureDisplay(0)
+	//		captureMutex.Unlock()
 
-			if err != nil {
-				log.Printf("Error capturando pantalla: %v", err)
-				continue
-			}
+	//		if err != nil {
+	//			log.Printf("Error capturando pantalla: %v", err)
+	//			continue
+	//		}
 
-			// Enviar frame al canal
-			select {
-			case frameChan <- img:
-			default:
-				// Si el canal está lleno, descartamos el frame
-			}
-		}
-	}()
+	//		// Enviar frame al canal
+	//		select {
+	//		case frameChan <- img:
+	//		default:
+	//			// Si el canal está lleno, descartamos el frame
+	//		}
+	//	}
+	//}()
 
 	frameCount := 0
 	lastFPS := time.Now()
@@ -684,20 +687,138 @@ func handleEventConnection(conn net.Conn) {
 	}
 
 	// Buffer para recibir eventos
-	eventBuffer := make([]byte, 9) // Máximo tamaño de evento (mouse motion)
-
+	eventBuffer := make([]byte, 70) // 1 tipo + 1 idx + 1 axes + 1 btns + 64 name (para caps)
 	var lastX, lastY int
 
+	// Canal y goroutine para joystick
+	joystickChan := make(chan [9]byte, 32)
+	gamepads := make(map[byte]uinput.Gamepad)
+	jsCaps := make(map[byte]struct{axes, btns byte; name string})
+	// Mapeos dinámicos por idx
+	buttonCodes := []int{
+		uinput.ButtonSouth, uinput.ButtonEast, uinput.ButtonWest, uinput.ButtonNorth,
+		uinput.ButtonBumperLeft, uinput.ButtonBumperRight, uinput.ButtonTriggerLeft, uinput.ButtonTriggerRight,
+		uinput.ButtonThumbLeft, uinput.ButtonThumbRight, uinput.ButtonSelect, uinput.ButtonStart, uinput.ButtonMode,
+		uinput.ButtonDpadUp, uinput.ButtonDpadDown, uinput.ButtonDpadLeft, uinput.ButtonDpadRight,
+	}
+	axisNames := []string{"LeftStickX", "LeftStickY", "RightStickX", "RightStickY"}
+	jsBtnMap := make(map[byte][]int)
+	jsAxisMap := make(map[byte][]string)
+	go func() {
+		for raw := range joystickChan {
+			idx := raw[0]
+			js_event := raw[1:9]
+			if _, ok := gamepads[idx]; !ok {
+				caps, hasCaps := jsCaps[idx]
+				if hasCaps {
+					log.Printf("Creando gamepad virtual para js%d: axes=%d btns=%d name=%s", idx, caps.axes, caps.btns, caps.name)
+					gp, err := uinput.CreateGamepad("/dev/uinput", []byte(caps.name), 0x1234, 0x5678)
+					if err != nil {
+						log.Printf("No se pudo crear gamepad virtual para js%d: %v", idx, err)
+						continue
+					}
+					gamepads[idx] = gp
+				} else {
+					log.Printf("Creando gamepad virtual genérico para js%d", idx)
+					gp, err := uinput.CreateGamepad("/dev/uinput", []byte(fmt.Sprintf("screenshare-js%d", idx)), 0x1234, 0x5678)
+					if err != nil {
+						log.Printf("No se pudo crear gamepad virtual para js%d: %v", idx, err)
+						continue
+					}
+					gamepads[idx] = gp
+				}
+				log.Printf("Gamepad virtual creado para js%d", idx)
+			}
+			value := int16(binary.LittleEndian.Uint16(js_event[4:6]))
+			type_ := js_event[6]
+			number := js_event[7]
+			gp := gamepads[idx]
+			if type_&0x01 != 0 {
+				btnMap, ok := jsBtnMap[idx]
+				if ok && int(number) < len(btnMap) {
+					code := btnMap[int(number)]
+					if value != 0 {
+						gp.ButtonDown(code)
+					} else {
+						gp.ButtonUp(code)
+					}
+				} else {
+					log.Printf("[JOYSTICK][WARN] Botón %d fuera de rango para js%d", number, idx)
+				}
+			} else if type_&0x02 != 0 {
+				axisMap, ok := jsAxisMap[idx]
+				if ok && int(number) < len(axisMap) {
+					v := float32(value) / 32767.0
+					axis := axisMap[int(number)]
+					switch axis {
+					case "LeftStickX":
+						gp.LeftStickMoveX(v)
+					case "LeftStickY":
+						gp.LeftStickMoveY(v)
+					case "RightStickX":
+						gp.RightStickMoveX(v)
+					case "RightStickY":
+						gp.RightStickMoveY(v)
+					}
+				} else {
+					log.Printf("[JOYSTICK][WARN] Eje %d fuera de rango para js%d", number, idx)
+				}
+			}
+		}
+	}()
+
 	for {
-		// Leer tipo de evento
 		_, err := io.ReadFull(conn, eventBuffer[:1])
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("Error leyendo tipo de evento: %v", err)
 			}
+			close(joystickChan)
 			return
 		}
 		eventType := eventBuffer[0]
+
+		if eventType == EVENT_JOYSTICK_CAPS {
+			// Leer idx, num_axes, num_btns, nombre (64 bytes)
+			_, err := io.ReadFull(conn, eventBuffer[1:68])
+			if err != nil {
+				log.Printf("Error leyendo caps de joystick: %v", err)
+				continue
+			}
+			idx := eventBuffer[1]
+			axes := eventBuffer[2]
+			btns := eventBuffer[3]
+			name := string(eventBuffer[4:68])
+			name = strings.TrimRight(name, "\x00")
+			jsCaps[idx] = struct{axes, btns byte; name string}{axes, btns, name}
+			// Generar mapping dinámico
+			btnMap := make([]int, btns)
+			for i := 0; i < int(btns) && i < len(buttonCodes); i++ {
+				btnMap[i] = buttonCodes[i]
+			}
+			jsBtnMap[idx] = btnMap
+			axisMap := make([]string, axes)
+			for i := 0; i < int(axes) && i < len(axisNames); i++ {
+				axisMap[i] = axisNames[i]
+			}
+			jsAxisMap[idx] = axisMap
+			log.Printf("[JOYSTICK_CAPS] idx=%d axes=%d btns=%d name=%s", idx, axes, btns, name)
+			continue
+		}
+
+		if eventType == EVENT_JOYSTICK {
+			_, err := io.ReadFull(conn, eventBuffer[1:10])
+			if err != nil {
+				log.Printf("Error leyendo evento joystick: %v", err)
+				close(joystickChan)
+				return
+			}
+			var raw [9]byte
+			raw[0] = eventBuffer[1] // idx
+			copy(raw[1:], eventBuffer[2:10]) // js_event
+			joystickChan <- raw
+			continue
+		}
 
 		switch eventType {
 		case EVENT_KEYDOWN, EVENT_KEYUP:

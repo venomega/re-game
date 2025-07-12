@@ -2,14 +2,16 @@ import socket
 import struct
 import numpy as np
 import sdl2
-import sdl2.ext
 import time
-import cv2
 import sys
 import threading
-from collections import deque
 import queue
 import os
+import av
+from PIL import Image
+import subprocess
+import fcntl
+import array
 
 # Constantes para tipos de eventos
 EVENT_KEYDOWN = 1
@@ -18,277 +20,247 @@ EVENT_MOUSEMOTION = 3
 EVENT_MOUSEBUTTONDOWN = 4
 EVENT_MOUSEBUTTONUP = 5
 EVENT_MOUSEWHEEL = 6
+AUDIO_ADDR= ""
+window = object()
+fullscreen = False
+EVENT_JOYSTICK = 10  # Tipo de evento para joystick
+EVENT_JOYSTICK_CAPS = 11  # Tipo de evento para capacidades de joystick
 
-class ScreenShareViewer:
-    def __init__(self, width, height, event_socket):
-        # Inicializar SDL
-        sdl2.ext.init()
-
-        # Guardar dimensiones originales del servidor
-        self.server_width = width
-        self.server_height = height
-
-        # Crear ventana
-        self.window = sdl2.ext.Window("Screen Share", size=(width, height))
-        self.window.show()
-
-        # Crear renderer
-        self.renderer = sdl2.ext.Renderer(self.window)
-        self.renderer.clear(sdl2.ext.Color(0, 0, 0))
-
-        # Crear textura con formato RGB24
-        self.texture = sdl2.SDL_CreateTexture(
-            self.renderer.sdlrenderer,
-            sdl2.SDL_PIXELFORMAT_RGB24,
-            sdl2.SDL_TEXTUREACCESS_STREAMING,
-            width,
-            height
-        )
-
-        # Variables para FPS
-        self.frame_count = 0
-        self.start_time = time.time()
-        self.fps = 0
-        self.last_frame_time = time.time()
-
-        # Tamaño de la ventana
-        self.window_width = width
-        self.window_height = height
-
-        # Buffer de frames circular
-        self.frame_buffer = deque(maxlen=1)  # Solo el último frame para mínima latencia
-        self.running = True
-        self.buffer_lock = threading.Lock()
-
-        # Pre-asignar buffer para RGB
-        self.rgb_buffer = np.zeros((height, width, 3), dtype=np.uint8)
-
-        # Socket para eventos
-        self.event_socket = event_socket
-
-        # Buffer de eventos y thread
-        self.event_queue = queue.Queue(maxsize=9)
-        self.event_thread = threading.Thread(target=self._event_sender)
-        self.event_thread.daemon = True
-        self.event_thread.start()
-
-        # Iniciar thread de eventos
-        self.event_processor_thread = threading.Thread(target=self._process_events)
-        self.event_processor_thread.daemon = True
-        self.event_processor_thread.start()
-
-        # Estado de modo relativo
-        self.relative_mouse_mode = True
-        sdl2.SDL_SetRelativeMouseMode(True)
-
-    def _event_sender(self):
-        """Thread dedicado para enviar eventos al servidor"""
-        while self.running:
-            try:
-                event_data = self.event_queue.get(timeout=0.001)  # Timeout corto para no bloquear
-                self.event_socket.sendall(event_data)
-            except queue.Empty:
-                continue
-            except Exception as e:
-                print(f"Error enviando evento: {e}")
-                break
-
-
-    def _process_events(self):
-        """Thread dedicado para procesar eventos SDL"""
-        while self.running:
-            events = sdl2.ext.get_events()
-            for event in events:
-                if event.type == sdl2.SDL_QUIT:
-                    self.running = False
-                    break
-                elif event.type == sdl2.SDL_KEYDOWN:
-                    # Alternar Ctrl+g para capturar/liberar el mouse
-                    if (event.key.keysym.sym == ord('g') or event.key.keysym.sym == ord('G')) and (event.key.keysym.mod & (sdl2.KMOD_LCTRL | sdl2.KMOD_RCTRL)):
-                        self.relative_mouse_mode = not self.relative_mouse_mode
-                        sdl2.SDL_SetRelativeMouseMode(self.relative_mouse_mode)
-                        print(f"[INFO] Mouse {'capturado' if self.relative_mouse_mode else 'liberado'} (relative mode {'ON' if self.relative_mouse_mode else 'OFF'})")
-                        # Si se libera el mouse, sincronizar la posición real con la última posición virtual
-                        if not self.relative_mouse_mode:
-                            try:
-                                # Warp el mouse a la última posición conocida
-                                sdl2.SDL_WarpMouseInWindow(self.window.window, event.motion.x, event.motion.y)
-                            except Exception:
-                                pass
-                    key_data = struct.pack('<I', event.key.keysym.sym)
-                    self.event_socket.sendall(struct.pack('<B', EVENT_KEYDOWN) + key_data)
-                elif event.type == sdl2.SDL_KEYUP:
-                    key_data = struct.pack('<I', event.key.keysym.sym)
-                    self.event_socket.sendall(struct.pack('<B', EVENT_KEYUP) + key_data)
-                elif event.type == sdl2.SDL_MOUSEMOTION:
-                    # Enviar evento de movimiento de mouse
-                    x = event.motion.x
-                    y = event.motion.y
-                    rel_x = event.motion.xrel
-                    rel_y = event.motion.yrel
-                    data = struct.pack('<Bhhhh', EVENT_MOUSEMOTION, x, y, rel_x, rel_y)
-                    self.event_socket.sendall(data)
-                elif event.type == sdl2.SDL_MOUSEBUTTONDOWN:
-                    # Enviar evento de botón presionado
-                    button = event.button.button
-                    x = event.button.x
-                    y = event.button.y
-                    data = struct.pack('<BBhh', EVENT_MOUSEBUTTONDOWN, button, x, y)
-                    self.event_socket.sendall(data)
-                elif event.type == sdl2.SDL_MOUSEBUTTONUP:
-                    # Enviar evento de botón liberado
-                    button = event.button.button
-                    x = event.button.x
-                    y = event.button.y
-                    data = struct.pack('<BBhh', EVENT_MOUSEBUTTONUP, button, x, y)
-                    self.event_socket.sendall(data)
-                elif event.type == sdl2.SDL_MOUSEWHEEL:
-                    # Enviar evento de rueda del mouse
-                    x = event.wheel.x
-                    y = event.wheel.y
-                    data = struct.pack('<Bhh', EVENT_MOUSEWHEEL, x, y)
-                    self.event_socket.sendall(data)
-            time.sleep(0.0001)  # Pequeña pausa para no saturar la CPU
-
-    def update_frame(self, frame_data):
-        try:
-            # Decodificar JPEG usando OpenCV
-            frame_array = np.frombuffer(frame_data, dtype=np.uint8)
-            frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
-            if frame is None:
-                return
-
-            # Obtener el tamaño actual de la ventana
-            window_size = self.window.size
-            if window_size != (self.window_width, self.window_height):
-                # Redimensionar la imagen al tamaño de la ventana
-                frame = cv2.resize(frame, window_size, interpolation=cv2.INTER_LINEAR)
-                self.window_width, self.window_height = window_size
-
-            # Convertir BGR a RGB usando buffer pre-asignado
-            cv2.cvtColor(frame, cv2.COLOR_BGR2RGB, dst=self.rgb_buffer)
-
-            # Actualizar textura
-            sdl2.SDL_UpdateTexture(
-                self.texture,
-                None,
-                self.rgb_buffer.tobytes(),
-                self.rgb_buffer.shape[1] * 3
-            )
-
-            # Limpiar renderer
-            self.renderer.clear()
-
-            # Dibujar textura
-            sdl2.SDL_RenderCopy(
-                self.renderer.sdlrenderer,
-                self.texture,
-                None,
-                None
-            )
-            sdl2.SDL_RenderPresent(self.renderer.sdlrenderer)
-
-            # Calcular FPS y latencia
-            self.frame_count += 1
-            current_time = time.time()
-            elapsed_time = current_time - self.start_time
-            latency = (current_time - self.last_frame_time) * 1000  # ms
-
-            if elapsed_time >= 1.0:
-                self.fps = self.frame_count / elapsed_time
-                print(f"FPS: {self.fps:.1f}, Latencia: {latency:.1f}ms")
-                self.frame_count = 0
-                self.start_time = current_time
-
-            self.last_frame_time = current_time
-
-        except Exception as e:
-            print(f"Error procesando frame: {e}")
-
-    def cleanup(self):
-        self.running = False
-        sdl2.SDL_DestroyTexture(self.texture)
-        sdl2.ext.quit()
-
-def receive_frames(client, viewer):
-    # Pre-asignar buffer para recepción
-    receive_buffer = bytearray(1024 * 1024)  # 1MB buffer
-
-    while viewer.running:
-        try:
-            # Recibir tamaño del frame comprimido
-            frame_size = struct.unpack('<I', client.recv(4))[0]
-
-            # Recibir frame comprimido usando buffer pre-asignado
-            bytes_received = 0
-            while bytes_received < frame_size:
-                chunk = client.recv(min(frame_size - bytes_received, 65536))
-                if not chunk:
-                    raise ConnectionError("Conexión cerrada por el servidor")
-                receive_buffer[bytes_received:bytes_received+len(chunk)] = chunk
-                bytes_received += len(chunk)
-
-            # Agregar frame al buffer circular
-            with viewer.buffer_lock:
-                viewer.frame_buffer.append(bytes(receive_buffer[:frame_size]))
-
-        except Exception as e:
-            print(f"Error recibiendo frames: {e}")
+def receive_frames_ffmpeg(frame_queue, width, height, udp_port=5000):
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-flush_packets", "1",
+        "-max_delay", "0",
+        "-i", f"udp://0.0.0.0:{udp_port}",
+        "-f", "rawvideo",
+        "-pix_fmt", "rgb24",
+        "-"
+    ]
+    proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=open("/dev/null", "bw"), bufsize=10**8)
+    while True:
+        raw_frame = proc.stdout.read(width * height * 3)
+        if len(raw_frame) < width * height * 3:
             break
+        img = np.frombuffer(raw_frame, np.uint8).reshape((height, width, 3))
+        frame_queue.put(img, timeout=0.1)
+
+def send_events(event_socket, running_flag):
+    event = sdl2.SDL_Event()
+    relative_mouse_mode = True
+    sdl2.SDL_SetRelativeMouseMode(True)
+    while running_flag['running']:
+        while sdl2.SDL_PollEvent(event):
+            if event.type == sdl2.SDL_QUIT:
+                running_flag['running'] = False
+                break
+            elif event.type == sdl2.SDL_KEYDOWN:
+                keysym = event.key.keysym
+                # Alternar Ctrl+g para capturar/liberar el mouse
+                if (keysym.sym == ord('f') or keysym.sym == ord('F')) and (keysym.mod & (sdl2.KMOD_LCTRL | sdl2.KMOD_RCTRL)):
+                    fullscreen = not fullscreen
+                    if fullscreen:
+                        sdl2.SDL_SetWindowFullscreen(window, sdl2.SDL_WINDOW_FULLSCREEN)
+                    else:
+                        sdl2.SDL_SetWindowFullscreen(window, 0)  # 0 para modo ventana
+                if (keysym.sym == ord('g') or keysym.sym == ord('G')) and (keysym.mod & (sdl2.KMOD_LCTRL | sdl2.KMOD_RCTRL)):
+                    relative_mouse_mode = not relative_mouse_mode
+                    sdl2.SDL_SetRelativeMouseMode(relative_mouse_mode)
+                    print(f"[INFO] Mouse {'capturado' if relative_mouse_mode else 'liberado'} (relative mode {'ON' if relative_mouse_mode else 'OFF'})")
+                key_data = struct.pack('<I', keysym.sym)
+                event_socket.sendall(struct.pack('<B', EVENT_KEYDOWN) + key_data)
+            elif event.type == sdl2.SDL_KEYUP:
+                keysym = event.key.keysym
+                key_data = struct.pack('<I', keysym.sym)
+                event_socket.sendall(struct.pack('<B', EVENT_KEYUP) + key_data)
+            elif event.type == sdl2.SDL_MOUSEMOTION:
+                x = event.motion.x
+                y = event.motion.y
+                rel_x = event.motion.xrel
+                rel_y = event.motion.yrel
+                data = struct.pack('<Bhhhh', EVENT_MOUSEMOTION, x, y, rel_x, rel_y)
+                event_socket.sendall(data)
+            elif event.type == sdl2.SDL_MOUSEBUTTONDOWN:
+                button = event.button.button
+                x = event.button.x
+                y = event.button.y
+                data = struct.pack('<BBhh', EVENT_MOUSEBUTTONDOWN, button, x, y)
+                event_socket.sendall(data)
+            elif event.type == sdl2.SDL_MOUSEBUTTONUP:
+                button = event.button.button
+                x = event.button.x
+                y = event.button.y
+                data = struct.pack('<BBhh', EVENT_MOUSEBUTTONUP, button, x, y)
+                event_socket.sendall(data)
+            elif event.type == sdl2.SDL_MOUSEWHEEL:
+                x = event.wheel.x
+                y = event.wheel.y
+                data = struct.pack('<Bhh', EVENT_MOUSEWHEEL, x, y)
+                event_socket.sendall(data)
+        time.sleep(0.0001)
+
+def get_local_ip():
+    """Obtiene la IP local de la interfaz de red principal."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # No importa si no hay conectividad, solo queremos la IP local
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = '127.0.0.1'
+    finally:
+        s.close()
+    return ip
 
 def receive_audio():
-    os.system("ffplay -rtsp_flags listen rtsp://192.168.2.192:8888 -nodisp")
+    os.system(f"ffplay -rtsp_flags listen rtsp://@:8888 -nodisp")
+
+def joystick_reader(event_socket, running_flag):
+    import glob
+    import select
+    js_devices = glob.glob('/dev/input/js*')
+    js_fds = []
+    JSIOCGAXES = 0x80016a11
+    JSIOCGBUTTONS = 0x80016a12
+    JSIOCGNAME = 0x81006a13
+    for idx, dev in enumerate(js_devices):
+        try:
+            fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
+            js_fds.append((idx, fd))
+            # Leer capacidades
+            # Ejes
+            buf_axes = array.array('B', [0])
+            fcntl.ioctl(fd, JSIOCGAXES, buf_axes, True)
+            num_axes = buf_axes[0]
+            # Botones
+            buf_btns = array.array('B', [0])
+            fcntl.ioctl(fd, JSIOCGBUTTONS, buf_btns, True)
+            num_btns = buf_btns[0]
+            # Nombre
+            buf_name = array.array('B', [0]*64)
+            try:
+                fcntl.ioctl(fd, JSIOCGNAME + (0x10000 * len(buf_name)), buf_name, True)
+                name = buf_name.tobytes().split(b'\x00',1)[0].decode(errors='ignore')
+            except Exception:
+                name = f"js{idx}"
+            print(f"[JOYSTICK] Detectado: {dev} (idx={idx}) axes={num_axes} btns={num_btns} name={name}")
+            # Enviar paquete de capacidades al server
+            name_bytes = name.encode(errors='ignore')[:63]
+            name_bytes += b'\x00' * (64 - len(name_bytes))
+            caps_packet = struct.pack('<BBB', EVENT_JOYSTICK_CAPS, idx, num_axes) + struct.pack('<B', num_btns) + name_bytes
+            event_socket.sendall(caps_packet)
+        except Exception as e:
+            print(f"[JOYSTICK][WARN] No se pudo abrir {dev}: {e}")
+    if not js_fds:
+        print("[JOYSTICK] No se detectaron joysticks.")
+        return
+    try:
+        while running_flag['running']:
+            rlist, _, _ = select.select([fd for _, fd in js_fds], [], [], 0.05)
+            for idx, fd in js_fds:
+                if fd in rlist:
+                    try:
+                        data = os.read(fd, 8)
+                        if len(data) == 8:
+                            event_type = data[6]
+                            if event_type & 0x80:
+                                continue  # Ignora eventos INIT
+                            try:
+                                event_socket.sendall(struct.pack('<BB', EVENT_JOYSTICK, idx) + data)
+                            except Exception as send_err:
+                                print(f"[JOYSTICK][ERROR] Error enviando evento joystick {idx}: {send_err}")
+                                return  # Termina solo este hilo, no afecta el resto
+                    except BlockingIOError:
+                        continue
+                    except Exception as e:
+                        print(f"[JOYSTICK][WARN] Error leyendo joystick {idx}: {e}")
+            time.sleep(0.001)
+    except Exception as e:
+        print(f"[JOYSTICK][ERROR] Hilo joystick terminó: {e}")
+    finally:
+        for _, fd in js_fds:
+            os.close(fd)
+        print("[JOYSTICK] Hilo joystick finalizado")
 
 def main():
-    # Conectar al servidor para frames
-    frame_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Conectar al servidor para eventos
+    global window
     event_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
     server_ip = ""
     try:
         server_ip = sys.argv[1]
     except:
         print("Uso: python client.py <IP_DEL_SERVIDOR>")
         sys.exit(1)
-
-    frame_socket.connect((server_ip, 8080))
     event_socket.connect((server_ip, 8081))
-
-    # Recibir dimensiones de la pantalla
-    width = struct.unpack('<I', frame_socket.recv(4))[0]
-    height = struct.unpack('<I', frame_socket.recv(4))[0]
-    print(f"Dimensiones de la pantalla: {width}x{height}")
-
-    # Crear viewer
-    viewer = ScreenShareViewer(width, height, event_socket)
-
-    # Iniciar thread de recepción de frames
-    receive_thread = threading.Thread(target=receive_frames, args=(frame_socket, viewer))
-    receive_thread.daemon = False
-    receive_thread.start()
-
-    # Iniciar thread de audio
+    AUDIO_ADDR = event_socket.getsockname()[0]
+    print("ASDDSA", AUDIO_ADDR)
+    width, height = 1360, 768
+    print(f"Resolución esperada: {width}x{height}")
+    sdl2.SDL_Init(sdl2.SDL_INIT_VIDEO)
+    window = sdl2.SDL_CreateWindow(
+        b"Screen Share",
+        sdl2.SDL_WINDOWPOS_CENTERED,
+        sdl2.SDL_WINDOWPOS_CENTERED,
+        width, height,
+        sdl2.SDL_WINDOW_FULLSCREEN
+    )
+    renderer = sdl2.SDL_CreateRenderer(window, -1, sdl2.SDL_RENDERER_SOFTWARE)
+    texture = sdl2.SDL_CreateTexture(
+        renderer,
+        sdl2.SDL_PIXELFORMAT_RGB24,
+        sdl2.SDL_TEXTUREACCESS_STREAMING,
+        width,
+        height
+    )
+    frame_queue = queue.Queue(maxsize=2)
+    running_flag = {'running': True}
     audio_thread = threading.Thread(target=receive_audio)
     audio_thread.daemon = False
     audio_thread.start()
-
-    try:
-        running = True
-        while running:
-            # Procesar solo el frame más reciente y descartar los viejos
-            with viewer.buffer_lock:
-                if viewer.frame_buffer:
-                    frame_data = viewer.frame_buffer.pop()  # Toma el más reciente
-                    viewer.frame_buffer.clear()  # Descarta los viejos
-                    viewer.update_frame(frame_data)
-
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        viewer.cleanup()
-        frame_socket.close()
-        event_socket.close()
+    threading.Thread(target=receive_frames_ffmpeg, args=(frame_queue, width, height), daemon=True).start()
+    threading.Thread(target=send_events, args=(event_socket, running_flag), daemon=True).start()
+    # Lanzar el hilo de joystick como daemon, completamente desacoplado
+    threading.Thread(target=joystick_reader, args=(event_socket, running_flag), daemon=True).start()
+    frame_count = 0
+    start_time = time.time()
+    while running_flag['running']:
+        try:
+            while True:
+                img = frame_queue.get_nowait()
+                # Robustez: verifica shape y contigüidad
+                if img.shape != (height, width, 3):
+                    print(f"[WARN] Frame shape inválido: {img.shape}, esperado: ({height}, {width}, 3). Ignorando frame.")
+                    continue
+                if not img.flags['C_CONTIGUOUS'] or img.strides[0] != img.shape[1] * 3:
+                    img = np.ascontiguousarray(img)
+                try:
+                    # print("Frame shape:", img.shape, "dtype:", img.dtype)
+                    data = img.tobytes()
+                    expected_len = height * width * 3
+                    if len(data) != expected_len:
+                        print(f"[WARN] Frame data size inválido: {len(data)}, esperado: {expected_len}. Ignorando frame.")
+                        continue
+                    sdl2.SDL_UpdateTexture(texture, None, data, img.shape[1] * 3)
+                    sdl2.SDL_RenderClear(renderer)
+                    sdl2.SDL_RenderCopy(renderer, texture, None, None)
+                    sdl2.SDL_RenderPresent(renderer)
+                    frame_count += 1
+                except Exception as e:
+                    print(f"[ERROR] Excepción al renderizar frame: {e}")
+        except queue.Empty:
+            pass
+        # FPS opcional
+        if time.time() - start_time >= 1.0:
+            print(f"FPS: {frame_count}")
+            frame_count = 0
+            start_time = time.time()
+        time.sleep(0.001)
+    sdl2.SDL_DestroyTexture(texture)
+    sdl2.SDL_DestroyRenderer(renderer)
+    sdl2.SDL_DestroyWindow(window)
+    sdl2.SDL_Quit()
+    event_socket.close()
 
 if __name__ == "__main__":
     main()

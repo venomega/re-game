@@ -124,6 +124,8 @@ def joystick_reader(event_socket, running_flag):
     JSIOCGAXES = 0x80016a11
     JSIOCGBUTTONS = 0x80016a12
     JSIOCGNAME = 0x81006a13
+    JSIOCGAXMAP = 0x80406a32
+    JSIOCGBTNMAP = 0x84006a34
     for idx, dev in enumerate(js_devices):
         try:
             fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
@@ -144,11 +146,23 @@ def joystick_reader(event_socket, running_flag):
                 name = buf_name.tobytes().split(b'\x00',1)[0].decode(errors='ignore')
             except Exception:
                 name = f"js{idx}"
+            # Leer códigos reales de ejes y botones
+            axmap = array.array('B', [0]*num_axes)
+            btnmap = array.array('H', [0]*num_btns)
+            try:
+                fcntl.ioctl(fd, JSIOCGAXMAP, axmap, True)
+            except Exception:
+                axmap = array.array('B', [i for i in range(num_axes)])
+            try:
+                fcntl.ioctl(fd, JSIOCGBTNMAP, btnmap, True)
+            except Exception:
+                btnmap = array.array('H', [0x100 + i for i in range(num_btns)])
             print(f"[JOYSTICK] Detectado: {dev} (idx={idx}) axes={num_axes} btns={num_btns} name={name}")
             # Enviar paquete de capacidades al server
             name_bytes = name.encode(errors='ignore')[:63]
             name_bytes += b'\x00' * (64 - len(name_bytes))
             caps_packet = struct.pack('<BBB', EVENT_JOYSTICK_CAPS, idx, num_axes) + struct.pack('<B', num_btns) + name_bytes
+            caps_packet += axmap.tobytes() + btnmap.tobytes()
             event_socket.sendall(caps_packet)
         except Exception as e:
             print(f"[JOYSTICK][WARN] No se pudo abrir {dev}: {e}")
@@ -203,7 +217,7 @@ def main():
         sdl2.SDL_WINDOWPOS_CENTERED,
         sdl2.SDL_WINDOWPOS_CENTERED,
         width, height,
-        sdl2.SDL_WINDOW_FULLSCREEN
+        0
     )
     renderer = sdl2.SDL_CreateRenderer(window, -1, sdl2.SDL_RENDERER_SOFTWARE)
     texture = sdl2.SDL_CreateTexture(

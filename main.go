@@ -22,6 +22,7 @@ import (
 	"github.com/kbinani/screenshot"
 	"github.com/go-vgo/robotgo"
 	"github.com/ThomasT75/uinput"
+	"screenshare/vjoy"
 )
 
 const (
@@ -692,18 +693,10 @@ func handleEventConnection(conn net.Conn) {
 
 	// Canal y goroutine para joystick
 	joystickChan := make(chan [9]byte, 32)
-	gamepads := make(map[byte]uinput.Gamepad)
+	gamepads := make(map[byte]*vjoy.VJoy)
 	jsCaps := make(map[byte]struct{axes, btns byte; name string})
-	// Mapeos dinámicos por idx
-	buttonCodes := []int{
-		uinput.ButtonSouth, uinput.ButtonEast, uinput.ButtonWest, uinput.ButtonNorth,
-		uinput.ButtonBumperLeft, uinput.ButtonBumperRight, uinput.ButtonTriggerLeft, uinput.ButtonTriggerRight,
-		uinput.ButtonThumbLeft, uinput.ButtonThumbRight, uinput.ButtonSelect, uinput.ButtonStart, uinput.ButtonMode,
-		uinput.ButtonDpadUp, uinput.ButtonDpadDown, uinput.ButtonDpadLeft, uinput.ButtonDpadRight,
-	}
-	axisNames := []string{"LeftStickX", "LeftStickY", "RightStickX", "RightStickY"}
 	jsBtnMap := make(map[byte][]int)
-	jsAxisMap := make(map[byte][]string)
+	jsAxisMap := make(map[byte][]int)
 	go func() {
 		for raw := range joystickChan {
 			idx := raw[0]
@@ -711,36 +704,36 @@ func handleEventConnection(conn net.Conn) {
 			if _, ok := gamepads[idx]; !ok {
 				caps, hasCaps := jsCaps[idx]
 				if hasCaps {
-					log.Printf("Creando gamepad virtual para js%d: axes=%d btns=%d name=%s", idx, caps.axes, caps.btns, caps.name)
-					gp, err := uinput.CreateGamepad("/dev/uinput", []byte(caps.name), 0x1234, 0x5678)
+					axmap := jsAxisMap[idx]
+					btnmap := jsBtnMap[idx]
+					vj, err := vjoy.Create(caps.name, axmap, btnmap)
 					if err != nil {
-						log.Printf("No se pudo crear gamepad virtual para js%d: %v", idx, err)
+						log.Printf("No se pudo crear joystick virtual para js%d: %v", idx, err)
 						continue
 					}
-					gamepads[idx] = gp
+					gamepads[idx] = vj
 				} else {
-					log.Printf("Creando gamepad virtual genérico para js%d", idx)
-					gp, err := uinput.CreateGamepad("/dev/uinput", []byte(fmt.Sprintf("screenshare-js%d", idx)), 0x1234, 0x5678)
+					vj, err := vjoy.Create(fmt.Sprintf("screenshare-js%d", idx), []int{0x00, 0x01}, []int{0x100})
 					if err != nil {
-						log.Printf("No se pudo crear gamepad virtual para js%d: %v", idx, err)
+						log.Printf("No se pudo crear joystick virtual para js%d: %v", idx, err)
 						continue
 					}
-					gamepads[idx] = gp
+					gamepads[idx] = vj
 				}
-				log.Printf("Gamepad virtual creado para js%d", idx)
+				log.Printf("Joystick virtual creado para js%d", idx)
 			}
 			value := int16(binary.LittleEndian.Uint16(js_event[4:6]))
 			type_ := js_event[6]
 			number := js_event[7]
-			gp := gamepads[idx]
+			vj := gamepads[idx]
 			if type_&0x01 != 0 {
 				btnMap, ok := jsBtnMap[idx]
 				if ok && int(number) < len(btnMap) {
 					code := btnMap[int(number)]
 					if value != 0 {
-						gp.ButtonDown(code)
+						vj.SendButton(code, 1)
 					} else {
-						gp.ButtonUp(code)
+						vj.SendButton(code, 0)
 					}
 				} else {
 					log.Printf("[JOYSTICK][WARN] Botón %d fuera de rango para js%d", number, idx)
@@ -748,18 +741,8 @@ func handleEventConnection(conn net.Conn) {
 			} else if type_&0x02 != 0 {
 				axisMap, ok := jsAxisMap[idx]
 				if ok && int(number) < len(axisMap) {
-					v := float32(value) / 32767.0
-					axis := axisMap[int(number)]
-					switch axis {
-					case "LeftStickX":
-						gp.LeftStickMoveX(v)
-					case "LeftStickY":
-						gp.LeftStickMoveY(v)
-					case "RightStickX":
-						gp.RightStickMoveX(v)
-					case "RightStickY":
-						gp.RightStickMoveY(v)
-					}
+					code := axisMap[int(number)]
+					vj.SendAxis(code, int32(value))
 				} else {
 					log.Printf("[JOYSTICK][WARN] Eje %d fuera de rango para js%d", number, idx)
 				}
@@ -790,19 +773,37 @@ func handleEventConnection(conn net.Conn) {
 			btns := eventBuffer[3]
 			name := string(eventBuffer[4:68])
 			name = strings.TrimRight(name, "\x00")
+			// Leer arrays de códigos de ejes y botones
+			axmap := make([]int, axes)
+			btnmap := make([]int, btns)
+			if axes > 0 {
+				axbuf := make([]byte, int(axes))
+				_, err := io.ReadFull(conn, axbuf)
+				if err != nil {
+					log.Printf("Error leyendo axmap: %v", err)
+					continue
+				}
+				for i := 0; i < int(axes); i++ {
+					axmap[i] = int(axbuf[i])
+				}
+				log.Printf("axmap (Go): %v", axmap)
+			}
+			if btns > 0 {
+				btnbuf := make([]byte, 2*int(btns))
+				_, err := io.ReadFull(conn, btnbuf)
+				if err != nil {
+					log.Printf("Error leyendo btnmap: %v", err)
+					continue
+				}
+				for i := 0; i < int(btns); i++ {
+					btnmap[i] = int(binary.LittleEndian.Uint16(btnbuf[i*2:(i+1)*2]))
+				}
+				log.Printf("btnmap (Go): %v", btnmap)
+			}
 			jsCaps[idx] = struct{axes, btns byte; name string}{axes, btns, name}
-			// Generar mapping dinámico
-			btnMap := make([]int, btns)
-			for i := 0; i < int(btns) && i < len(buttonCodes); i++ {
-				btnMap[i] = buttonCodes[i]
-			}
-			jsBtnMap[idx] = btnMap
-			axisMap := make([]string, axes)
-			for i := 0; i < int(axes) && i < len(axisNames); i++ {
-				axisMap[i] = axisNames[i]
-			}
-			jsAxisMap[idx] = axisMap
-			log.Printf("[JOYSTICK_CAPS] idx=%d axes=%d btns=%d name=%s", idx, axes, btns, name)
+			jsAxisMap[idx] = axmap
+			jsBtnMap[idx] = btnmap
+			log.Printf("[JOYSTICK_CAPS] idx=%d axes=%d btns=%d name=%s axmap=%v btnmap=%v", idx, axes, btns, name, axmap, btnmap)
 			continue
 		}
 

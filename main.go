@@ -626,9 +626,62 @@ func handleAudioConnection(conn net.Conn) {
 	}
 }
 
+// Lanza ffmpeg para capturar la pantalla y enviar el stream al cliente por UDP
+func startFFmpegScreenCapture(clientIP string) error {
+	//ffmpeg -re -f x11grab -video_size 1360x768 -i :0.0 -vaapi_device /dev/dri/renderD128 -vcodec h264_vaapi -vf format=nv12|vaapi,hwupload -b:v 5M -minrate 5M -maxrate 5M -bufsize 1M -f mpegts udp://192.168.2.185:5000
+	args := []string{
+		"-f", "x11grab",   // Usar x11grab para capturar pantalla
+		"-video_size", "1360x768", // Tamaño de la pantalla
+		"-framerate", "60", // Tasa de fotogramas
+		"-i", ":0.0",      // Entrada de pantalla x11grab
+		"-vaapi_device", "/dev/dri/renderD128", // Dispositivo vaapi
+		"-vcodec", "h264_vaapi", // Usar codificador VAAPI para H.h264_vaapi
+		"-vf", "format=nv12|vaapi,hwupload", // Formato y subida a hardware
+		"-r", "60", // Tasa de fotogramas de salida
+		"-b:v", "10M",       // Tasa de bits de video_size
+		"-minrate", "10M",   // Tasa de bits Mínima
+		"-maxrate", "10M",   // Tasa de bits máxima
+		"-bufsize", "4M",   // Tamaño del bufferSize
+		"-f", "mpegts",     // Formato de salida: MPEG-TS
+		"udp://" + clientIP + ":5000", // Dirección UDP del Cliente
+	}
+
+	//args := []string{
+	//	"-re",
+	//	"-f", "x11grab",
+	//	"-video_size", "1360x768",
+	//	"-i", ":0.0",
+	//	"-vaapi_device", "/dev/dri/renderD128",
+	//	"-vcodec", "h264_vaapi",
+	//	"-vf", "format=nv12|vaapi,hwupload",
+	//	"-f", "mpegts",
+	//	"udp://" + clientIP + ":5000",
+	//}
+	cmd := exec.Command("ffmpeg", args...)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	err := cmd.Start()
+	if err == nil {
+		log.Printf("ffmpeg lanzado con h264_vaapi para %s", clientIP)
+		return nil
+	} else {
+		log.Printf("Fallo ffmpeg con h264_vaapi: %v", err)
+		return err
+	}
+}
+
 func handleEventConnection(conn net.Conn) {
 	defer conn.Close()
 	log.Printf("Cliente conectado para eventos desde %s", conn.RemoteAddr())
+
+	// Lanzar ffmpeg al conectar el cliente de eventos
+	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+	err := startFFmpegScreenCapture(clientIP)
+	if err != nil {
+		log.Printf("Error lanzando ffmpeg: %v", err)
+	} else {
+		log.Printf("ffmpeg lanzado para %s", clientIP)
+	}
 
 	// Buffer para recibir eventos
 	eventBuffer := make([]byte, 9) // Máximo tamaño de evento (mouse motion)
@@ -819,7 +872,6 @@ func main() {
 		defer wg.Done()
 		for {
 			conn, err := frameListener.Accept()
-			chan_addr <- conn.RemoteAddr().String()
 			if err != nil {
 				log.Printf("Error al aceptar conexión de frames: %v", err)
 				continue
@@ -835,6 +887,7 @@ func main() {
 		for {
 			println("Reached")
 			client_addr := strings.Split(<-chan_addr, ":")[0]
+			println("Reached2")
 			// ffmpeg -re -f pulse -i alsa_output.pci-0000_08_00.1.hdmi-stereo-extra3.monitor -f rtsp rtsp://192.168.2.192:8888
 			cmd := exec.Command(
 				"ffmpeg",
@@ -868,6 +921,7 @@ func main() {
 		defer wg.Done()
 		for {
 			conn, err := eventListener.Accept()
+			chan_addr <- conn.RemoteAddr().String()
 			if err != nil {
 				log.Printf("Error al aceptar conexión de eventos: %v", err)
 				continue

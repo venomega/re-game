@@ -641,10 +641,10 @@ func startFFmpegScreenCapture(clientIP string) error {
 		"-vaapi_device", "/dev/dri/renderD128", // Dispositivo vaapi
 		"-vcodec", "h264_vaapi", // Usar codificador VAAPI para H.h264_vaapi
 		"-vf", "format=nv12|vaapi,hwupload", // Formato y subida a hardware
-		"-r", "60", // Tasa de fotogramas de salida
-		"-b:v", "10M",       // Tasa de bits de video_size
-		"-minrate", "10M",   // Tasa de bits Mínima
-		"-maxrate", "10M",   // Tasa de bits máxima
+		"-r", "40", // Tasa de fotogramas de salida
+		"-b:v", "8M",       // Tasa de bits de video_size
+		"-minrate", "8M",   // Tasa de bits Mínima
+		"-maxrate", "8M",   // Tasa de bits máxima
 		"-bufsize", "4M",   // Tamaño del bufferSize
 		"-f", "mpegts",     // Formato de salida: MPEG-TS
 		"udp://" + clientIP + ":5000", // Dirección UDP del Cliente
@@ -1007,9 +1007,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 		for {
-			println("Reached")
 			client_addr := strings.Split(<-chan_addr, ":")[0]
-			println("Reached2")
 			// ffmpeg -re -f pulse -i alsa_output.pci-0000_08_00.1.hdmi-stereo-extra3.monitor -f rtsp rtsp://192.168.2.192:8888
 			cmd := exec.Command(
 				"ffmpeg",

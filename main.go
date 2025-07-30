@@ -641,7 +641,7 @@ func startFFmpegScreenCapture(clientIP string) error {
 		"-vaapi_device", "/dev/dri/renderD128", // Dispositivo vaapi
 		"-vcodec", "h264_vaapi", // Usar codificador VAAPI para H.h264_vaapi
 		"-vf", "format=nv12|vaapi,hwupload", // Formato y subida a hardware
-		"-r", "40", // Tasa de fotogramas de salida
+		"-r", "60", // Tasa de fotogramas de salida
 		"-b:v", "8M",       // Tasa de bits de video_size
 		"-minrate", "8M",   // Tasa de bits Mínima
 		"-maxrate", "8M",   // Tasa de bits máxima

@@ -10,6 +10,9 @@ import os
 import av
 from PIL import Image
 import subprocess
+import fcntl
+import array
+import json
 
 # Constantes para tipos de eventos
 EVENT_KEYDOWN = 1
@@ -18,6 +21,11 @@ EVENT_MOUSEMOTION = 3
 EVENT_MOUSEBUTTONDOWN = 4
 EVENT_MOUSEBUTTONUP = 5
 EVENT_MOUSEWHEEL = 6
+AUDIO_ADDR= ""
+window = object()
+fullscreen = False
+EVENT_JOYSTICK = 10  # Tipo de evento para joystick
+EVENT_JOYSTICK_CAPS = 11  # Tipo de evento para capacidades de joystick
 
 def receive_frames_ffmpeg(frame_queue, width, height, udp_port=5000):
     ffmpeg_cmd = [
@@ -90,20 +98,102 @@ def send_events(event_socket, running_flag):
 def get_local_ip():
     """Obtiene la IP local de la interfaz de red principal."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    #try:
-    #    # No importa si no hay conectividad, solo queremos la IP local
-    #    s.connect(('8.8.8.8', 80))
-    #    ip = s.getsockname()[0]
-    #except Exception:
-    #    ip = '127.0.0.1'
-    #finally:
-    #    s.close()
-    #return ip
+    try:
+        # No importa si no hay conectividad, solo queremos la IP local
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = '127.0.0.1'
+    finally:
+        s.close()
+    return ip
 
 def receive_audio():
-    os.system("ffplay -rtsp_flags listen rtsp://@:8888 -nodisp")
+    os.system(f"ffplay -rtsp_flags listen rtsp://@:8888 -nodisp")
+
+def joystick_reader(event_socket, running_flag):
+    import glob
+    import select
+    js_devices = glob.glob('/dev/input/js*')
+    js_fds = []
+    JSIOCGAXES = 0x80016a11
+    JSIOCGBUTTONS = 0x80016a12
+    JSIOCGNAME = 0x81006a13
+    JSIOCGAXMAP = 0x80406a32
+    JSIOCGBTNMAP = 0x84006a34
+    for idx, dev in enumerate(js_devices):
+        try:
+            fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
+            js_fds.append((idx, fd))
+            # Leer capacidades
+            # Ejes
+            buf_axes = array.array('B', [0])
+            fcntl.ioctl(fd, JSIOCGAXES, buf_axes, True)
+            num_axes = buf_axes[0]
+            # Botones
+            buf_btns = array.array('B', [0])
+            fcntl.ioctl(fd, JSIOCGBUTTONS, buf_btns, True)
+            num_btns = buf_btns[0]
+            # Nombre
+            buf_name = array.array('B', [0]*64)
+            try:
+                fcntl.ioctl(fd, JSIOCGNAME + (0x10000 * len(buf_name)), buf_name, True)
+                name = buf_name.tobytes().split(b'\x00',1)[0].decode(errors='ignore')
+            except Exception:
+                name = f"js{idx}"
+            # Leer códigos reales de ejes y botones
+            axmap = array.array('B', [0]*num_axes)
+            btnmap = array.array('H', [0]*num_btns)
+            try:
+                fcntl.ioctl(fd, JSIOCGAXMAP, axmap, True)
+            except Exception:
+                axmap = array.array('B', [i for i in range(num_axes)])
+            try:
+                fcntl.ioctl(fd, JSIOCGBTNMAP, btnmap, True)
+            except Exception:
+                btnmap = array.array('H', [0x100 + i for i in range(num_btns)])
+            print(f"[JOYSTICK] Detectado: {dev} (idx={idx}) axes={num_axes} btns={num_btns} name={name}")
+            # Enviar paquete de capacidades al server
+            name_bytes = name.encode(errors='ignore')[:63]
+            name_bytes += b'\x00' * (64 - len(name_bytes))
+            caps_packet = struct.pack('<BBB', EVENT_JOYSTICK_CAPS, idx, num_axes) + struct.pack('<B', num_btns) + name_bytes
+            caps_packet += axmap.tobytes() + btnmap.tobytes()
+            event_socket.sendall(caps_packet)
+        except Exception as e:
+            print(f"[JOYSTICK][WARN] No se pudo abrir {dev}: {e}")
+    if not js_fds:
+        print("[JOYSTICK] No se detectaron joysticks.")
+        return
+    try:
+        while running_flag['running']:
+            rlist, _, _ = select.select([fd for _, fd in js_fds], [], [], 0.05)
+            for idx, fd in js_fds:
+                if fd in rlist:
+                    try:
+                        data = os.read(fd, 8)
+                        if len(data) == 8:
+                            event_type = data[6]
+                            if event_type & 0x80:
+                                continue  # Ignora eventos INIT
+                            try:
+                                event_socket.sendall(struct.pack('<BB', EVENT_JOYSTICK, idx) + data)
+                            except Exception as send_err:
+                                print(f"[JOYSTICK][ERROR] Error enviando evento joystick {idx}: {send_err}")
+                                return  # Termina solo este hilo, no afecta el resto
+                    except BlockingIOError:
+                        continue
+                    except Exception as e:
+                        print(f"[JOYSTICK][WARN] Error leyendo joystick {idx}: {e}")
+            time.sleep(0.001)
+    except Exception as e:
+        print(f"[JOYSTICK][ERROR] Hilo joystick terminó: {e}")
+    finally:
+        for _, fd in js_fds:
+            os.close(fd)
+        print("[JOYSTICK] Hilo joystick finalizado")
 
 def main():
+    global window
     event_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_ip = ""
     try:
@@ -112,6 +202,8 @@ def main():
         print("Uso: python client.py <IP_DEL_SERVIDOR>")
         sys.exit(1)
     event_socket.connect((server_ip, 8081))
+    AUDIO_ADDR = event_socket.getsockname()[0]
+    print("ASDDSA", AUDIO_ADDR)
     width, height = 1360, 768
     print(f"Resolución esperada: {width}x{height}")
     sdl2.SDL_Init(sdl2.SDL_INIT_VIDEO)
@@ -137,6 +229,8 @@ def main():
     audio_thread.start()
     threading.Thread(target=receive_frames_ffmpeg, args=(frame_queue, width, height), daemon=True).start()
     threading.Thread(target=send_events, args=(event_socket, running_flag), daemon=True).start()
+    # Lanzar el hilo de joystick como daemon, completamente desacoplado
+    threading.Thread(target=joystick_reader, args=(event_socket, running_flag), daemon=True).start()
     frame_count = 0
     start_time = time.time()
     while running_flag['running']:

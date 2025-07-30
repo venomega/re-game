@@ -15,12 +15,14 @@ import (
 	"sync"
 	"time"
 	"strings"
+	"fmt"
 
 	"bufio"
 
 	"github.com/kbinani/screenshot"
 	"github.com/go-vgo/robotgo"
-	"github.com/bendahl/uinput"
+	"github.com/ThomasT75/uinput"
+	"screenshare/vjoy"
 )
 
 const (
@@ -38,6 +40,8 @@ const (
 	audioBufferSize = 1024  // Ajustado para mejor calidad
 )
 
+var video_process map[string]*os.Process = make(map[string]*os.Process)
+
 // Constantes para tipos de eventos
 const (
 	EVENT_KEYDOWN = 1
@@ -46,6 +50,8 @@ const (
 	EVENT_MOUSEBUTTONDOWN = 4
 	EVENT_MOUSEBUTTONUP = 5
 	EVENT_MOUSEWHEEL = 6
+	EVENT_JOYSTICK = 10
+	EVENT_JOYSTICK_CAPS = 11
 )
 
 // Estructura para eventos
@@ -362,34 +368,34 @@ func handleConnection(conn net.Conn) {
 	frameChan := make(chan image.Image, 1)
 
 	// Iniciar thread de captura
-	go func() {
-		lastCapture := time.Now()
-		for {
-			// Control de framerate para la captura
-			elapsed := time.Since(lastCapture)
-			if elapsed < frameDuration {
-				time.Sleep(frameDuration - elapsed)
-			}
-			lastCapture = time.Now()
+	//go func(){
+	//	lastCapture := time.Now()
+	//	for {
+	//		// Control de framerate para la captura
+	//		elapsed := time.Since(lastCapture)
+	//		if elapsed < frameDuration {
+	//			time.Sleep(frameDuration - elapsed)
+	//		}
+	//		lastCapture = time.Now()
 
-			// Captura de pantalla con mutex
-			captureMutex.Lock()
-			img, err := screenshot.CaptureDisplay(0)
-			captureMutex.Unlock()
+	//		// Captura de pantalla con mutex
+	//		captureMutex.Lock()
+	//		img, err := screenshot.CaptureDisplay(0)
+	//		captureMutex.Unlock()
 
-			if err != nil {
-				log.Printf("Error capturando pantalla: %v", err)
-				continue
-			}
+	//		if err != nil {
+	//			log.Printf("Error capturando pantalla: %v", err)
+	//			continue
+	//		}
 
-			// Enviar frame al canal
-			select {
-			case frameChan <- img:
-			default:
-				// Si el canal está lleno, descartamos el frame
-			}
-		}
-	}()
+	//		// Enviar frame al canal
+	//		select {
+	//		case frameChan <- img:
+	//		default:
+	//			// Si el canal está lleno, descartamos el frame
+	//		}
+	//	}
+	//}()
 
 	frameCount := 0
 	lastFPS := time.Now()
@@ -638,9 +644,9 @@ func startFFmpegScreenCapture(clientIP string) error {
 		"-vcodec", "h264_vaapi", // Usar codificador VAAPI para H.h264_vaapi
 		"-vf", "format=nv12|vaapi,hwupload", // Formato y subida a hardware
 		"-r", "60", // Tasa de fotogramas de salida
-		"-b:v", "10M",       // Tasa de bits de video_size
-		"-minrate", "10M",   // Tasa de bits Mínima
-		"-maxrate", "10M",   // Tasa de bits máxima
+		"-b:v", "8M",       // Tasa de bits de video_size
+		"-minrate", "8M",   // Tasa de bits Mínima
+		"-maxrate", "8M",   // Tasa de bits máxima
 		"-bufsize", "4M",   // Tamaño del bufferSize
 		"-f", "mpegts",     // Formato de salida: MPEG-TS
 		"udp://" + clientIP + ":5000", // Dirección UDP del Cliente
@@ -661,6 +667,7 @@ func startFFmpegScreenCapture(clientIP string) error {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	err := cmd.Start()
+	video_process[clientIP] = cmd.Process
 	if err == nil {
 		log.Printf("ffmpeg lanzado con h264_vaapi para %s", clientIP)
 		return nil
@@ -684,20 +691,138 @@ func handleEventConnection(conn net.Conn) {
 	}
 
 	// Buffer para recibir eventos
-	eventBuffer := make([]byte, 9) // Máximo tamaño de evento (mouse motion)
-
+	eventBuffer := make([]byte, 70) // 1 tipo + 1 idx + 1 axes + 1 btns + 64 name (para caps)
 	var lastX, lastY int
 
+	// Canal y goroutine para joystick
+	joystickChan := make(chan [9]byte, 32)
+	gamepads := make(map[byte]*vjoy.VJoy)
+	jsCaps := make(map[byte]struct{axes, btns byte; name string})
+	jsBtnMap := make(map[byte][]int)
+	jsAxisMap := make(map[byte][]int)
+	go func() {
+		for raw := range joystickChan {
+			idx := raw[0]
+			js_event := raw[1:9]
+			if _, ok := gamepads[idx]; !ok {
+				caps, hasCaps := jsCaps[idx]
+				if hasCaps {
+					axmap := jsAxisMap[idx]
+					btnmap := jsBtnMap[idx]
+					vj, err := vjoy.Create(caps.name, axmap, btnmap)
+					if err != nil {
+						log.Printf("No se pudo crear joystick virtual para js%d: %v", idx, err)
+						continue
+					}
+					gamepads[idx] = vj
+				} else {
+					vj, err := vjoy.Create(fmt.Sprintf("screenshare-js%d", idx), []int{0x00, 0x01}, []int{0x100})
+					if err != nil {
+						log.Printf("No se pudo crear joystick virtual para js%d: %v", idx, err)
+						continue
+					}
+					gamepads[idx] = vj
+				}
+				log.Printf("Joystick virtual creado para js%d", idx)
+			}
+			value := int16(binary.LittleEndian.Uint16(js_event[4:6]))
+			type_ := js_event[6]
+			number := js_event[7]
+			vj := gamepads[idx]
+			if type_&0x01 != 0 {
+				btnMap, ok := jsBtnMap[idx]
+				if ok && int(number) < len(btnMap) {
+					code := btnMap[int(number)]
+					if value != 0 {
+						vj.SendButton(code, 1)
+					} else {
+						vj.SendButton(code, 0)
+					}
+				} else {
+					log.Printf("[JOYSTICK][WARN] Botón %d fuera de rango para js%d", number, idx)
+				}
+			} else if type_&0x02 != 0 {
+				axisMap, ok := jsAxisMap[idx]
+				if ok && int(number) < len(axisMap) {
+					code := axisMap[int(number)]
+					vj.SendAxis(code, int32(value))
+				} else {
+					log.Printf("[JOYSTICK][WARN] Eje %d fuera de rango para js%d", number, idx)
+				}
+			}
+		}
+	}()
+
 	for {
-		// Leer tipo de evento
 		_, err := io.ReadFull(conn, eventBuffer[:1])
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("Error leyendo tipo de evento: %v", err)
 			}
+			close(joystickChan)
 			return
 		}
 		eventType := eventBuffer[0]
+
+		if eventType == EVENT_JOYSTICK_CAPS {
+			// Leer idx, num_axes, num_btns, nombre (64 bytes)
+			_, err := io.ReadFull(conn, eventBuffer[1:68])
+			if err != nil {
+				log.Printf("Error leyendo caps de joystick: %v", err)
+				continue
+			}
+			idx := eventBuffer[1]
+			axes := eventBuffer[2]
+			btns := eventBuffer[3]
+			name := string(eventBuffer[4:68])
+			name = strings.TrimRight(name, "\x00")
+			// Leer arrays de códigos de ejes y botones
+			axmap := make([]int, axes)
+			btnmap := make([]int, btns)
+			if axes > 0 {
+				axbuf := make([]byte, int(axes))
+				_, err := io.ReadFull(conn, axbuf)
+				if err != nil {
+					log.Printf("Error leyendo axmap: %v", err)
+					continue
+				}
+				for i := 0; i < int(axes); i++ {
+					axmap[i] = int(axbuf[i])
+				}
+				log.Printf("axmap (Go): %v", axmap)
+			}
+			if btns > 0 {
+				btnbuf := make([]byte, 2*int(btns))
+				_, err := io.ReadFull(conn, btnbuf)
+				if err != nil {
+					log.Printf("Error leyendo btnmap: %v", err)
+					continue
+				}
+				for i := 0; i < int(btns); i++ {
+					btnmap[i] = int(binary.LittleEndian.Uint16(btnbuf[i*2:(i+1)*2]))
+				}
+				log.Printf("btnmap (Go): %v", btnmap)
+			}
+			jsCaps[idx] = struct{axes, btns byte; name string}{axes, btns, name}
+			jsAxisMap[idx] = axmap
+			jsBtnMap[idx] = btnmap
+			log.Printf("[JOYSTICK_CAPS] idx=%d axes=%d btns=%d name=%s axmap=%v btnmap=%v", idx, axes, btns, name, axmap, btnmap)
+			continue
+		}
+
+		if eventType == EVENT_JOYSTICK {
+			_, err := io.ReadFull(conn, eventBuffer[1:10])
+			if err != nil {
+				log.Printf("Error leyendo evento joystick: %v", err)
+				close(joystickChan)
+				return
+			}
+			var raw [9]byte
+			raw[0] = eventBuffer[1] // idx
+			copy(raw[1:], eventBuffer[2:10]) // js_event
+			joystickChan <- raw
+			continue
+		}
 
 		switch eventType {
 		case EVENT_KEYDOWN, EVENT_KEYUP:
@@ -885,20 +1010,30 @@ func main() {
 	go func() {
 		defer wg.Done()
 		for {
-			println("Reached")
 			client_addr := strings.Split(<-chan_addr, ":")[0]
-			println("Reached2")
 			// ffmpeg -re -f pulse -i alsa_output.pci-0000_08_00.1.hdmi-stereo-extra3.monitor -f rtsp rtsp://192.168.2.192:8888
 			cmd := exec.Command(
 				"ffmpeg",
 				"-re",             // Leer entrada a la tasa de fotogramas nativa
+				"-xerror",
 				"-f", "pulse",     // Usar PulseAudio
 				"-i", GetDefaultSink(), // Usar el monitor de la salida de audio por defecto
 				"-f", "rtsp",       // Formato de salida: rtp
 				"rtsp://"+client_addr+":8888", // Dirección RTSP del cliente
 			)
 			time.Sleep(1e9 * 4)
-			go cmd.Run()
+			go func (cmd *exec.Cmd, client_addr string) {
+				err = cmd.Start()
+				if err != nil {
+					log.Printf("Error al iniciar ffmpeg para RTSP: %v", err)
+				} else {
+					log.Printf("ffmpeg lanzado para RTSP en %s", client_addr)
+				}
+				cmd.Wait()
+				video_process[client_addr].Kill()
+
+			} (cmd, client_addr)
+
 		}
 	}()
 

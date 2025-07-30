@@ -109,7 +109,7 @@ def get_local_ip():
     return ip
 
 def receive_audio():
-    os.system(f"ffplay -rtsp_flags listen rtsp://@:8888 -nodisp")
+    os.system(f"ffplay -nodisp  -fflags nobuffer -flags low_delay -analyzeduration 0 -probesize 32  -ar 48000 -rtsp_flags listen rtsp://@:8888")
 
 def joystick_reader(event_socket, running_flag):
     import glob

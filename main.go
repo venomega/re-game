@@ -1029,7 +1029,12 @@ func main() {
 				} else {
 					log.Printf("ffmpeg lanzado para RTSP en %s", client_addr)
 				}
-				cmd.Wait()
+				err = cmd.Wait()
+				if err != nil {
+					log.Printf("Error en ffmpeg RTSP: %v", err)
+				} else {
+					log.Printf("ffmpeg RTSP finalizado para %s", client_addr)
+				}
 				video_process[client_addr].Kill()
 
 			} (cmd, client_addr)

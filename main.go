@@ -40,6 +40,8 @@ const (
 	audioBufferSize = 1024  // Ajustado para mejor calidad
 )
 
+var video_process map[string]*os.Process = make(map[string]*os.Process)
+
 // Constantes para tipos de eventos
 const (
 	EVENT_KEYDOWN = 1
@@ -665,6 +667,7 @@ func startFFmpegScreenCapture(clientIP string) error {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	err := cmd.Start()
+	video_process[clientIP] = cmd.Process
 	if err == nil {
 		log.Printf("ffmpeg lanzado con h264_vaapi para %s", clientIP)
 		return nil
@@ -1012,13 +1015,25 @@ func main() {
 			cmd := exec.Command(
 				"ffmpeg",
 				"-re",             // Leer entrada a la tasa de fotogramas nativa
+				"-xerror",
 				"-f", "pulse",     // Usar PulseAudio
 				"-i", GetDefaultSink(), // Usar el monitor de la salida de audio por defecto
 				"-f", "rtsp",       // Formato de salida: rtp
 				"rtsp://"+client_addr+":8888", // Dirección RTSP del cliente
 			)
 			time.Sleep(1e9 * 4)
-			go cmd.Run()
+			go func (cmd *exec.Cmd, client_addr string) {
+				err = cmd.Start()
+				if err != nil {
+					log.Printf("Error al iniciar ffmpeg para RTSP: %v", err)
+				} else {
+					log.Printf("ffmpeg lanzado para RTSP en %s", client_addr)
+				}
+				cmd.Wait()
+				video_process[client_addr].Kill()
+
+			} (cmd, client_addr)
+
 		}
 	}()
 

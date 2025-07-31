@@ -201,11 +201,12 @@ def main():
     except:
         print("Uso: python client.py <IP_DEL_SERVIDOR>")
         sys.exit(1)
+
     event_socket.connect((server_ip, 8081))
-    AUDIO_ADDR = event_socket.getsockname()[0]
-    print("ASDDSA", AUDIO_ADDR)
-    width, height = 1360, 768
+    width = struct.unpack('!I', event_socket.recv(4))[0]  # '!I' para big-endian unsigned int
+    height = struct.unpack('!I', event_socket.recv(4))[0]  # '!I' para big-endian unsigned int
     print(f"Resolución esperada: {width}x{height}")
+
     sdl2.SDL_Init(sdl2.SDL_INIT_VIDEO)
     window = sdl2.SDL_CreateWindow(
         b"Screen Share",

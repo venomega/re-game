@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"io"
@@ -12,17 +13,17 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
-	"strings"
-	"fmt"
 
 	"bufio"
 
-	"github.com/kbinani/screenshot"
-	"github.com/go-vgo/robotgo"
-	"github.com/ThomasT75/uinput"
 	"screenshare/vjoy"
+
+	"github.com/ThomasT75/uinput"
+	"github.com/go-vgo/robotgo"
+	"github.com/kbinani/screenshot"
 )
 
 const (
@@ -356,6 +357,7 @@ func handleConnection(conn net.Conn) {
 	bounds := screenshot.GetDisplayBounds(0)
 	width := bounds.Dx()
 	height := bounds.Dy()
+	println("handleConnection REACHED")
 
 	// Enviar dimensiones al cliente
 	binary.Write(conn, binary.LittleEndian, uint32(width))
@@ -634,12 +636,21 @@ func handleAudioConnection(conn net.Conn) {
 
 // Lanza ffmpeg para capturar la pantalla y enviar el stream al cliente por UDP
 func startFFmpegScreenCapture(clientIP string) error {
+	asd := screenshot.GetDisplayBounds(0)
+	data := strings.Split(asd.String(), "-")[1]
+	width := strings.Split(data, ",")[0][1:]
+	height := strings.Split(data, ",")[1]
+	height_len := len(height)
+	height = height[:height_len-1]
+	var screen_size string = width + "x" + height
+
 	//ffmpeg -re -f x11grab -video_size 1360x768 -i :0.0 -vaapi_device /dev/dri/renderD128 -vcodec h264_vaapi -vf format=nv12|vaapi,hwupload -b:v 5M -minrate 5M -maxrate 5M -bufsize 1M -f mpegts udp://192.168.2.185:5000
 	args := []string{
+		//"-loglevel", "debug",
 		"-f", "x11grab",   // Usar x11grab para capturar pantalla
-		"-video_size", "1360x768", // Tamaño de la pantalla
+		"-i", ":0",      // Entrada de pantalla x11grab
+		"-video_size", screen_size, // Tamaño de la pantalla
 		"-framerate", "60", // Tasa de fotogramas
-		"-i", ":0.0",      // Entrada de pantalla x11grab
 		"-vaapi_device", "/dev/dri/renderD128", // Dispositivo vaapi
 		"-vcodec", "h264_vaapi", // Usar codificador VAAPI para H.h264_vaapi
 		"-vf", "format=nv12|vaapi,hwupload", // Formato y subida a hardware
@@ -1061,12 +1072,17 @@ func main() {
 		defer wg.Done()
 		for {
 			conn, err := eventListener.Accept()
-			chan_addr <- conn.RemoteAddr().String()
 			if err != nil {
 				log.Printf("Error al aceptar conexión de eventos: %v", err)
 				continue
 			}
+			chan_addr <- conn.RemoteAddr().String()
 			log.Printf("Cliente conectado para eventos desde %s", conn.RemoteAddr())
+			bounds := screenshot.GetDisplayBounds(0)
+			width := bounds.Dx()
+			height := bounds.Dy()
+			binary.Write(conn, binary.BigEndian, int32(width))
+			binary.Write(conn, binary.BigEndian, int32(height))
 			go handleEventConnection(conn)
 		}
 	}()

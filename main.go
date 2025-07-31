@@ -647,7 +647,7 @@ func startFFmpegScreenCapture(clientIP string) error {
 		"-b:v", "8M",       // Tasa de bits de video_size
 		"-minrate", "8M",   // Tasa de bits Mínima
 		"-maxrate", "8M",   // Tasa de bits máxima
-		"-bufsize", "4M",   // Tamaño del bufferSize
+		"-bufsize", "8M",   // Tamaño del bufferSize
 		"-f", "mpegts",     // Formato de salida: MPEG-TS
 		"udp://" + clientIP + ":5000", // Dirección UDP del Cliente
 	}

@@ -1022,15 +1022,21 @@ func main() {
 		defer wg.Done()
 		for {
 			client_addr := strings.Split(<-chan_addr, ":")[0]
-			// ffmpeg -re -f pulse -i alsa_output.pci-0000_08_00.1.hdmi-stereo-extra3.monitor -f rtsp rtsp://192.168.2.192:8888
+			//ffmpeg -re -xerror  -f pulse -i alsa_output.pci-0000_08_00.1.hdmi-stereo-extra3.monitor  -f s16le -ar 48000 -ac 2 -acodec pcm_s16le  -fflags nobuffer  -flags low_delay  -probesize 32  -flush_packets 1 udp://192.168.2.185:1234?pkt_size=1472
 			cmd := exec.Command(
-				"ffmpeg",
-				"-re",             // Leer entrada a la tasa de fotogramas nativa
+				"ffmpeg", "-re",
 				"-xerror",
-				"-f", "pulse",     // Usar PulseAudio
-				"-i", GetDefaultSink(), // Usar el monitor de la salida de audio por defecto
-				"-f", "rtsp",       // Formato de salida: rtp
-				"rtsp://"+client_addr+":8888", // Dirección RTSP del cliente
+				"-f", "pulse",
+				"-i", GetDefaultSink(),
+				"-f", "s16le",
+				"-ar", "48000",
+				"-ac", "2",
+				"-codec", "pcm_s16le",
+				"-fflags", "nobuffer",
+				"-flags", "low_delay",
+				"-probesize", "32",
+				"-flush_packets", "1",
+				"udp://" + client_addr + ":8888?pkt_size=1472",
 			)
 			time.Sleep(1e9 * 4)
 			go func (cmd *exec.Cmd, client_addr string) {

@@ -26,17 +26,17 @@ import (
 )
 
 const (
-	frameRate = 60  // FPS realista para baja latencia
-	frameDuration = time.Second / frameRate
-	framePort = ":8080"
-	eventPort = ":8081"
-	audioPort = ":8082"  // Puerto para streaming de audio
-	maxBufferSize = 1024 * 1024 // 1MB buffer
-	bufferSize = 1 // Buffer de 1 frame para mínima latencia
-	jpegQuality = 40 // Mejor balance calidad/velocidad
+	frameRate       = 60 // FPS realista para baja latencia
+	frameDuration   = time.Second / frameRate
+	framePort       = ":8080"
+	eventPort       = ":8081"
+	audioPort       = ":8082"     // Puerto para streaming de audio
+	maxBufferSize   = 1024 * 1024 // 1MB buffer
+	bufferSize      = 1           // Buffer de 1 frame para mínima latencia
+	jpegQuality     = 40          // Mejor balance calidad/velocidad
 	eventBufferSize = 1
 	audioSampleRate = 48000 // Tasa de muestreo de audio actualizada a 48kHz
-	audioChannels = 2       // Audio estéreo
+	audioChannels   = 2     // Audio estéreo
 	audioBufferSize = 1024  // Ajustado para mejor calidad
 )
 
@@ -44,14 +44,14 @@ var video_process map[string]*os.Process = make(map[string]*os.Process)
 
 // Constantes para tipos de eventos
 const (
-	EVENT_KEYDOWN = 1
-	EVENT_KEYUP = 2
-	EVENT_MOUSEMOTION = 3
+	EVENT_KEYDOWN         = 1
+	EVENT_KEYUP           = 2
+	EVENT_MOUSEMOTION     = 3
 	EVENT_MOUSEBUTTONDOWN = 4
-	EVENT_MOUSEBUTTONUP = 5
-	EVENT_MOUSEWHEEL = 6
-	EVENT_JOYSTICK = 10
-	EVENT_JOYSTICK_CAPS = 11
+	EVENT_MOUSEBUTTONUP   = 5
+	EVENT_MOUSEWHEEL      = 6
+	EVENT_JOYSTICK        = 10
+	EVENT_JOYSTICK_CAPS   = 11
 )
 
 // Estructura para eventos
@@ -282,40 +282,40 @@ func init() {
 
 // Mapeo de códigos SDL a códigos de robotgo
 var keyMap = map[uint32]string{
-	13:  "enter",     // Return
-	8:   "backspace", // Backspace
-	9:   "tab",       // Tab
-	27:  "esc",       // Escape
-	32:  "space",     // Space
-	273: "up",        // Up arrow
-	274: "down",      // Down arrow
-	275: "right",     // Right arrow
-	276: "left",      // Left arrow
-	277: "insert",    // Insert
-	278: "home",      // Home
-	279: "end",       // End
-	280: "pageup",    // Page Up
-	281: "pagedown",  // Page Down
-	282: "f1",        // F1
-	283: "f2",        // F2
-	284: "f3",        // F3
-	285: "f4",        // F4
-	286: "f5",        // F5
-	287: "f6",        // F6
-	288: "f7",        // F7
-	289: "f8",        // F8
-	290: "f9",        // F9
-	291: "f10",       // F10
-	292: "f11",       // F11
-	293: "f12",       // F12
-	1073742048: "ctrl",   // Left Ctrl
-	1073742052: "ctrl",   // Right Ctrl
-	1073742049: "shift",  // Left Shift
-	1073742053: "shift",  // Right Shift
-	1073742050: "alt",    // Left Alt
-	1073742054: "alt",    // Right Alt
-	1073742051: "super",  // Left Super/Windows
-	1073742055: "super",  // Right Super/Windows
+	13:         "enter",     // Return
+	8:          "backspace", // Backspace
+	9:          "tab",       // Tab
+	27:         "esc",       // Escape
+	32:         "space",     // Space
+	273:        "up",        // Up arrow
+	274:        "down",      // Down arrow
+	275:        "right",     // Right arrow
+	276:        "left",      // Left arrow
+	277:        "insert",    // Insert
+	278:        "home",      // Home
+	279:        "end",       // End
+	280:        "pageup",    // Page Up
+	281:        "pagedown",  // Page Down
+	282:        "f1",        // F1
+	283:        "f2",        // F2
+	284:        "f3",        // F3
+	285:        "f4",        // F4
+	286:        "f5",        // F5
+	287:        "f6",        // F6
+	288:        "f7",        // F7
+	289:        "f8",        // F8
+	290:        "f9",        // F9
+	291:        "f10",       // F10
+	292:        "f11",       // F11
+	293:        "f12",       // F12
+	1073742048: "ctrl",      // Left Ctrl
+	1073742052: "ctrl",      // Right Ctrl
+	1073742049: "shift",     // Left Shift
+	1073742053: "shift",     // Right Shift
+	1073742050: "alt",       // Left Alt
+	1073742054: "alt",       // Right Alt
+	1073742051: "super",     // Left Super/Windows
+	1073742055: "super",     // Right Super/Windows
 }
 
 // Estado de las teclas modificadoras
@@ -329,8 +329,8 @@ var modifierState = struct {
 
 // Estado del mouse grab
 var mouseGrab = struct {
-	enabled bool
-	windowX, windowY int
+	enabled                   bool
+	windowX, windowY          int
 	windowWidth, windowHeight int
 	sync.Mutex
 }{}
@@ -344,7 +344,6 @@ func getKeyName(keyCode uint32) string {
 	// Para teclas normales, convertir a minúscula
 	return string(rune(keyCode))
 }
-
 
 // Mutex global para sincronizar la captura de pantalla
 var captureMutex sync.Mutex
@@ -452,15 +451,15 @@ func captureSystemAudio(audioChan chan<- []float32) {
 	// Construct ffmpeg command to capture from ALSA
 	for {
 		cmd := exec.Command("ffmpeg",
-			"-re",             // Read input at native frame rate
-			"-f", "alsa",      // Use ALSA directly
-			"-i", "default",   // Use default ALSA device
-			"-f", "f32le",     // Output format: 32-bit float little-endian
-			"-ar", "48000",    // Sample rate: 48kHz
-			"-ac", "2",        // Channels: stereo
+			"-re",        // Read input at native frame rate
+			"-f", "alsa", // Use ALSA directly
+			"-i", "default", // Use default ALSA device
+			"-f", "f32le", // Output format: 32-bit float little-endian
+			"-ar", "48000", // Sample rate: 48kHz
+			"-ac", "2", // Channels: stereo
 			"-bufsize", "4096", // Buffer size ajustado
 			"-loglevel", "error", // Solo errores
-			"-")               // Output to stdout
+			"-") // Output to stdout
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
@@ -554,13 +553,13 @@ func handleAudioConnection(conn net.Conn) {
 
 	// Enviar configuración de audio al cliente
 	config := struct {
-		SampleRate   uint32
-		Channels     uint32
-		BufferSize   uint32
+		SampleRate uint32
+		Channels   uint32
+		BufferSize uint32
 	}{
-		SampleRate:   uint32(audioSampleRate),
-		Channels:     uint32(audioChannels),
-		BufferSize:   uint32(audioBufferSize),
+		SampleRate: uint32(audioSampleRate),
+		Channels:   uint32(audioChannels),
+		BufferSize: uint32(audioBufferSize),
 	}
 
 	log.Printf("Sending audio configuration: SampleRate=%d, Channels=%d, BufferSize=%d",
@@ -646,19 +645,19 @@ func startFFmpegScreenCapture(clientIP string) error {
 	//ffmpeg -re -f x11grab -video_size 1360x768 -i :0.0 -vaapi_device /dev/dri/renderD128 -vcodec h264_vaapi -vf format=nv12|vaapi,hwupload -b:v 5M -minrate 5M -maxrate 5M -bufsize 1M -f mpegts udp://192.168.2.185:5000
 	args := []string{
 		//"-loglevel", "debug",
-		"-f", "x11grab",   // Usar x11grab para capturar pantalla
-		"-i", ":0",      // Entrada de pantalla x11grab
+		"-f", "x11grab", // Usar x11grab para capturar pantalla
+		"-i", ":0", // Entrada de pantalla x11grab
 		"-video_size", screen_size, // Tamaño de la pantalla
 		"-framerate", "60", // Tasa de fotogramas
 		"-vaapi_device", "/dev/dri/renderD128", // Dispositivo vaapi
 		"-vcodec", "h264_vaapi", // Usar codificador VAAPI para H.h264_vaapi
 		"-vf", "format=nv12|vaapi,hwupload", // Formato y subida a hardware
 		"-r", "60", // Tasa de fotogramas de salida
-		"-b:v", "8M",       // Tasa de bits de video_size
-		"-minrate", "8M",   // Tasa de bits Mínima
-		"-maxrate", "8M",   // Tasa de bits máxima
-		"-bufsize", "8M",   // Tamaño del bufferSize
-		"-f", "mpegts",     // Formato de salida: MPEG-TS
+		"-b:v", "8M", // Tasa de bits de video_size
+		"-minrate", "8M", // Tasa de bits Mínima
+		"-maxrate", "8M", // Tasa de bits máxima
+		"-bufsize", "8M", // Tamaño del bufferSize
+		"-f", "mpegts", // Formato de salida: MPEG-TS
 		"udp://" + clientIP + ":5000", // Dirección UDP del Cliente
 	}
 
@@ -708,7 +707,10 @@ func handleEventConnection(conn net.Conn) {
 	// Canal y goroutine para joystick
 	joystickChan := make(chan [9]byte, 32)
 	gamepads := make(map[byte]*vjoy.VJoy)
-	jsCaps := make(map[byte]struct{axes, btns byte; name string})
+	jsCaps := make(map[byte]struct {
+		axes, btns byte
+		name       string
+	})
 	jsBtnMap := make(map[byte][]int)
 	jsAxisMap := make(map[byte][]int)
 	go func() {
@@ -756,7 +758,23 @@ func handleEventConnection(conn net.Conn) {
 				axisMap, ok := jsAxisMap[idx]
 				if ok && int(number) < len(axisMap) {
 					code := axisMap[int(number)]
+					// HAT axis fix: 0x10-0x17 are HAT axes.
+					// Offset Correction Mapping (Standard Range):
+					// Rest (0) -> Send -32768 (Confirmed Correct)
+					// Left (-32767) -> Send -1 (Target Positive Output)
+					// Right (32767) -> Send 1 (Target Negative Output)
+					if code >= 0x10 && code <= 0x17 {
+						if value < -16000 {
+							value = -1
+						} else if value > 16000 {
+							value = 1
+						} else {
+							value = -32768
+						}
+						println("HAT MAPPED (Offset Correction): value", value)
+					}
 					vj.SendAxis(code, int32(value))
+					println("\tvalue", value)
 				} else {
 					log.Printf("[JOYSTICK][WARN] Eje %d fuera de rango para js%d", number, idx)
 				}
@@ -810,11 +828,14 @@ func handleEventConnection(conn net.Conn) {
 					continue
 				}
 				for i := 0; i < int(btns); i++ {
-					btnmap[i] = int(binary.LittleEndian.Uint16(btnbuf[i*2:(i+1)*2]))
+					btnmap[i] = int(binary.LittleEndian.Uint16(btnbuf[i*2 : (i+1)*2]))
 				}
 				log.Printf("btnmap (Go): %v", btnmap)
 			}
-			jsCaps[idx] = struct{axes, btns byte; name string}{axes, btns, name}
+			jsCaps[idx] = struct {
+				axes, btns byte
+				name       string
+			}{axes, btns, name}
 			jsAxisMap[idx] = axmap
 			jsBtnMap[idx] = btnmap
 			log.Printf("[JOYSTICK_CAPS] idx=%d axes=%d btns=%d name=%s axmap=%v btnmap=%v", idx, axes, btns, name, axmap, btnmap)
@@ -829,7 +850,7 @@ func handleEventConnection(conn net.Conn) {
 				return
 			}
 			var raw [9]byte
-			raw[0] = eventBuffer[1] // idx
+			raw[0] = eventBuffer[1]          // idx
 			copy(raw[1:], eventBuffer[2:10]) // js_event
 			joystickChan <- raw
 			continue
@@ -923,19 +944,19 @@ func handleEventConnection(conn net.Conn) {
 	}
 }
 
-func CheckErr(err error, text string){
-	if err != nil{
+func CheckErr(err error, text string) {
+	if err != nil {
 		println("ERROR:", text, err.Error())
 		os.Exit(1)
 	}
 }
 
-func GetDefaultSink() string{
+func GetDefaultSink() string {
 	cmd := exec.Command("pactl", "info")
 	stdout, err := cmd.Output()
 	CheckErr(err, "Error getting default sink")
 	sink := []byte("")
-	for _, v := range bytes.Split(stdout, []byte("\n")){
+	for _, v := range bytes.Split(stdout, []byte("\n")) {
 		if bytes.Contains(v, []byte("Default Sink:")) {
 			sink = bytes.TrimSpace(bytes.Split(v, []byte(":"))[1])
 		}
@@ -1017,7 +1038,6 @@ func main() {
 		}
 	}()
 
-
 	go func() {
 		defer wg.Done()
 		for {
@@ -1026,12 +1046,12 @@ func main() {
 			//cmd := exec.Command(
 			//	"ffmpeg", "-re", "-xerror", "-f", "pulse", "-i", GetDefaultSink(), "-f", "s16le", "-ar", "48000", "-ac", "2", "-codec", "pcm_s16le", "-fflags", "nobuffer", "-flags", "low_delay", "-probesize", "32", "-flush_packets", "1", "udp://" + client_addr + ":8888?pkt_size=1472",)
 			//cmd := exec.Command("ffmpeg", "-f", "pulse", "-i", "alsa_output.pci-0000_0a_00.3.iec958-stereo.monitor", "-acodec", "libopus", "-b:a", "64k", "-ar", "48000", "-ac", "2", "-f", "flv", "udp://192.168.2.185:8888") //working no truly zerolatency
-			cmd := exec.Command("parecord", "--rate=44100", "--channels=2", "--format=s16le", "--device=" + GetDefaultSink(), "--raw") //working seems like zerolatency
-			asd , _:= cmd.StdoutPipe()
+			cmd := exec.Command("parecord", "--rate=44100", "--channels=2", "--format=s16le", "--device="+GetDefaultSink(), "--raw") //working seems like zerolatency
+			asd, _ := cmd.StdoutPipe()
 			go AudioSender(asd, client_addr)
 
 			time.Sleep(1e9 * 4)
-			go func (cmd *exec.Cmd, client_addr string) {
+			go func(cmd *exec.Cmd, client_addr string) {
 				err = cmd.Start()
 				if err != nil {
 					log.Printf("Error al iniciar ffmpeg para RTSP: %v", err)
@@ -1046,7 +1066,7 @@ func main() {
 				}
 				video_process[client_addr].Kill()
 
-			} (cmd, client_addr)
+			}(cmd, client_addr)
 
 		}
 	}()

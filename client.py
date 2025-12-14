@@ -110,8 +110,8 @@ def get_local_ip():
 
 def receive_audio():
     # os.system("ffplay -nodisp -autoexit -f s16le -ar 48000 -i udp://@:8888 -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0")
-    os.system("ffplay -probesize 32 -analyzeduration 0 -sync ext -ar 48000 -f flv udp://0.0.0.0:8888 -nodisp") # working no truly zerolatency
-    # os.system("nc -l -u -p 8889 | pacat --rate=44100 --channels=2 --format=s16le") # seems like zerolatency
+    #os.system("ffplay -probesize 32 -analyzeduration 0 -sync ext -ar 48000 -f flv udp://0.0.0.0:8888 -nodisp") # working no truly zerolatency
+     os.system("nc -l -u -p 8889 | pacat --rate=44100 --channels=2 --format=s16le") # seems like zerolatency
 
 def joystick_reader(event_socket, running_flag):
     import glob

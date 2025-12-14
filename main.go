@@ -677,6 +677,7 @@ func startFFmpegScreenCapture(clientIP string) error {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	err := cmd.Start()
+	defer cmd.Wait()
 	video_process[clientIP] = cmd.Process
 	if err == nil {
 		log.Printf("ffmpeg lanzado con h264_vaapi para %s", clientIP)
@@ -1024,9 +1025,10 @@ func main() {
 			//ffmpeg -re -xerror  -f pulse -i alsa_output.pci-0000_08_00.1.hdmi-stereo-extra3.monitor  -f s16le -ar 48000 -ac 2 -acodec pcm_s16le  -fflags nobuffer  -flags low_delay  -probesize 32  -flush_packets 1 udp://192.168.2.185:1234?pkt_size=1472
 			//cmd := exec.Command(
 			//	"ffmpeg", "-re", "-xerror", "-f", "pulse", "-i", GetDefaultSink(), "-f", "s16le", "-ar", "48000", "-ac", "2", "-codec", "pcm_s16le", "-fflags", "nobuffer", "-flags", "low_delay", "-probesize", "32", "-flush_packets", "1", "udp://" + client_addr + ":8888?pkt_size=1472",)
-			cmd := exec.Command("ffmpeg", "-f", "pulse", "-i", "alsa_output.pci-0000_0a_00.3.iec958-stereo.monitor", "-acodec", "libopus", "-b:a", "64k", "-ar", "48000", "-ac", "2", "-f", "flv", "udp://192.168.2.185:8888") //working no truly zerolatency
-			//cmd := exec.Command("parecord", "--rate=44100", "--channels=2", "--format=s16le", "--device=" + GetDefaultSink(), "--raw") //working seems like zerolatency
-
+			//cmd := exec.Command("ffmpeg", "-f", "pulse", "-i", "alsa_output.pci-0000_0a_00.3.iec958-stereo.monitor", "-acodec", "libopus", "-b:a", "64k", "-ar", "48000", "-ac", "2", "-f", "flv", "udp://192.168.2.185:8888") //working no truly zerolatency
+			cmd := exec.Command("parecord", "--rate=44100", "--channels=2", "--format=s16le", "--device=" + GetDefaultSink(), "--raw") //working seems like zerolatency
+			asd , _:= cmd.StdoutPipe()
+			go AudioSender(asd, client_addr)
 
 			time.Sleep(1e9 * 4)
 			go func (cmd *exec.Cmd, client_addr string) {

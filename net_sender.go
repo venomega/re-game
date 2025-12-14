@@ -17,13 +17,11 @@ func AudioSender(fd  io.ReadCloser, client_addr string){
 			println("AudioSender ready")
 			for{
 				n, err := fd.Read(stdout_buffer)
-				println("AudioSender read", n)
 				if err != nil{
 					println("AudioSender exit", err.Error())
 					break
 				}
 				n, err = conn.Write(stdout_buffer[:n])
-				println("AudioSender send", n)
 				if err != nil{
 					println("AudioSender exit", err.Error())
 					break

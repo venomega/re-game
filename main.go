@@ -677,7 +677,7 @@ func startFFmpegScreenCapture(clientIP string) error {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	err := cmd.Start()
-	defer cmd.Wait()
+	go cmd.Wait()
 	video_process[clientIP] = cmd.Process
 	if err == nil {
 		log.Printf("ffmpeg lanzado con h264_vaapi para %s", clientIP)

@@ -215,9 +215,9 @@ def main():
         sdl2.SDL_WINDOWPOS_CENTERED,
         sdl2.SDL_WINDOWPOS_CENTERED,
         width, height,
-        0
+        sdl2.SDL_WINDOW_RESIZABLE
     )
-    renderer = sdl2.SDL_CreateRenderer(window, -1, sdl2.SDL_RENDERER_SOFTWARE)
+    renderer = sdl2.SDL_CreateRenderer(window, -1, sdl2.SDL_RENDERER_ACCELERATED)
     texture = sdl2.SDL_CreateTexture(
         renderer,
         sdl2.SDL_PIXELFORMAT_RGB24,
